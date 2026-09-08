@@ -1,0 +1,14 @@
+{
+  "domain": "decaid",
+  "name": "Decaid",
+  "codeowners": [
+    "@teich"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/teich/ha-decaid#readme",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "version": "0.1.0",
+  "issue_tracker": "https://github.com/teich/ha-decaid/issues"
+}

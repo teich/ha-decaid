@@ -1,0 +1,33 @@
+{
+  "title": "Decaid",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Decaid",
+        "description": "Enter the tablet IP address. Leave machine ID blank to match any machine; optionally enter its ID from /api/v1/devices.",
+        "data": {
+          "host": "Tablet IP address",
+          "port": "REST API port",
+          "machine_id": "Machine device ID (optional)"
+        }
+      },
+      "reconfigure": {
+        "title": "Change Decaid connection",
+        "description": "Enter the tablet IP address. Leave machine ID blank to match any machine; optionally enter its ID from /api/v1/devices.",
+        "data": {
+          "host": "Tablet IP address",
+          "port": "REST API port",
+          "machine_id": "Machine device ID (optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_host": "Enter a valid IPv4 or IPv6 address without a URL or port.",
+      "cannot_connect": "Cannot read Decaid machine state. Check the IP, port, and that the tablet REST API is reachable."
+    },
+    "abort": {
+      "already_configured": "This tablet endpoint is already configured.",
+      "reconfigure_successful": "Connection updated."
+    }
+  }
+}
