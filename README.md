@@ -9,12 +9,18 @@ Plain REST YAML works for readings and wake/sleep control, but it doesn't group 
 ## What you get
 
 - Wake/sleep switch that only sends a wake command when the machine is sleeping.
-- State, substate, temperatures, pressure, flow, and their targets, polled every 10 seconds.
+- State, substate, temperatures, pressure, flow, and their targets: updated every second during active operations, every two seconds while idle, and every ten seconds while sleeping or unreachable.
 - Profile, dose/yield targets, tablet battery, and machine/scale connectivity, polled every 60 seconds.
 
 After a successful wake/sleep command, the switch shows the requested state while the machine catches up, for up to 20 seconds. Polling then confirms it or restores the reported state.
 
 REST only for now. The sleep command can interrupt a running operation.
+
+## State and readiness
+
+**State** reports the operation (`sleeping`, `idle`, `espresso`, `needsWater`, etc.). **Substate** adds detail such as `preparingForShot`, `preinfusion`, and `pouring`. Decaid maps DE1 heater warm-up/stabilization to `preparingForShot`; the main state may still say `idle`.
+
+The API snapshot has no explicit brew-ready flag. `idle` alone does not establish thermal readiness; watch grouphead/mix temperatures against their targets. The integration preserves the raw states for automations. Decaid also offers a [WebSocket snapshot stream](https://github.com/decentespresso/decaid/blob/main/doc/Api.md#websocket-api), but this integration currently uses adaptive REST polling.
 
 ## Install
 

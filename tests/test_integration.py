@@ -271,3 +271,50 @@ async def test_wake_during_pending_sleep_uses_reported_state(hass, setup_entry, 
     # An optimistic sleep display must not cause idle to interrupt an awake machine.
     power.assert_awaited_once_with(False)
     assert hass.states.get("switch.decent_power").state == "on"
+
+
+@pytest.mark.parametrize(
+    ("state", "substate", "seconds"),
+    [
+        ("sleeping", "idle", 10),
+        ("idle", "idle", 2),
+        ("schedIdle", "idle", 2),
+        ("idle", "preparingForShot", 1),
+        ("heating", "idle", 1),
+        ("preheating", "preparingForShot", 1),
+        ("espresso", "preinfusion", 1),
+        ("espresso", "pouring", 1),
+        ("steam", "pouring", 1),
+        ("needsWater", "idle", 1),
+        (None, None, 10),
+    ],
+)
+async def test_adaptive_machine_polling(hass, setup_entry, payloads, state, substate, seconds):
+    entry, _ = setup_entry
+    payloads["machine/state"] = {"state": {"state": state, "substate": substate}}
+    await entry.runtime_data.machine.async_refresh()
+    assert entry.runtime_data.machine.update_interval.total_seconds() == seconds
+    for coordinator in (
+        entry.runtime_data.workflow,
+        entry.runtime_data.settings,
+        entry.runtime_data.devices,
+    ):
+        assert coordinator.update_interval.total_seconds() == 60
+    payloads["machine/state"] = {"state": {"state": "sleeping", "substate": "idle"}}
+    await entry.runtime_data.machine.async_refresh()
+    assert entry.runtime_data.machine.update_interval.total_seconds() == 10
+
+
+async def test_adaptive_polling_backs_off_on_failure(hass, setup_entry, payloads):
+    entry, _ = setup_entry
+    coordinator = entry.runtime_data.machine
+    payloads["machine/state"] = {"state": {"state": "espresso"}}
+    await coordinator.async_refresh()
+    assert coordinator.update_interval.total_seconds() == 1
+    payloads["machine/state"] = DecaidError("offline")
+    await coordinator.async_refresh()
+    assert coordinator.update_interval.total_seconds() == 10
+    assert hass.states.get("sensor.decent_state").state == "unavailable"
+    payloads["machine/state"] = {"state": {"state": "idle", "substate": "idle"}}
+    await coordinator.async_refresh()
+    assert coordinator.update_interval.total_seconds() == 2

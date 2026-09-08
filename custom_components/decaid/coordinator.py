@@ -28,9 +28,23 @@ class DecaidCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         try:
-            return await self.client.get(self.path)
+            data = await self.client.get(self.path)
         except DecaidError as err:
+            if self.path == "machine/state":
+                self.update_interval = timedelta(seconds=10)
             raise UpdateFailed(str(err)) from err
+        if self.path == "machine/state":
+            state = data["state"].get("state")
+            substate = data["state"].get("substate")
+            if state in (None, "", "unknown", "disconnected", "sleeping"):
+                seconds = 10
+            elif state in ("idle", "schedIdle") and substate in (None, "idle"):
+                # DE1 may remain idle during warm-up; keep temperatures responsive.
+                seconds = 2
+            else:
+                seconds = 1
+            self.update_interval = timedelta(seconds=seconds)
+        return data
 
 
 @dataclass
