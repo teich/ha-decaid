@@ -187,3 +187,87 @@ async def test_setup_retry_and_optional_failure(hass):
         assert hass.states.get("switch.decent_power").state == "unavailable"
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(
+    ("initial", "service", "expected", "confirmed"),
+    [("sleeping", "turn_on", "on", "heating"), ("idle", "turn_off", "off", "sleeping")],
+)
+async def test_power_transition_waits_for_confirmation(
+    hass, setup_entry, payloads, initial, service, expected, confirmed
+):
+    entry, _ = setup_entry
+    payloads["machine/state"] = {"state": {"state": initial}}
+    await entry.runtime_data.machine.async_refresh()
+    await hass.services.async_call(
+        "switch", service, {"entity_id": "switch.decent_power"}, blocking=True
+    )
+    # The immediate read still reports the old state, but the switch stays put.
+    assert hass.states.get("switch.decent_power").state == expected
+    assert hass.states.get("sensor.decent_state").state == initial
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get("switch.decent_power").state == expected
+    payloads["machine/state"] = {"state": {"state": confirmed}}
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get("switch.decent_power").state == expected
+    # Once confirmed, subsequent external changes must appear immediately.
+    payloads["machine/state"] = {"state": {"state": initial}}
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get("switch.decent_power").state != expected
+
+
+async def test_power_transition_expires(hass, setup_entry, freezer):
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": "switch.decent_power"}, blocking=True
+    )
+    assert hass.states.get("switch.decent_power").state == "on"
+    # Unchanged coordinator data suppresses notifications; the timer must still expire.
+    freezer.tick(timedelta(seconds=21))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("switch.decent_power").state == "off"
+
+
+async def test_failed_power_command_is_not_optimistic(hass, setup_entry):
+    _, power = setup_entry
+    power.side_effect = DecaidError("HTTP 503")
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "switch", "turn_on", {"entity_id": "switch.decent_power"}, blocking=True
+        )
+    assert hass.states.get("switch.decent_power").state == "off"
+
+
+async def test_pending_power_connection_loss(hass, setup_entry, payloads):
+    entry, _ = setup_entry
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": "switch.decent_power"}, blocking=True
+    )
+    assert hass.states.get("switch.decent_power").state == "on"
+    payloads["devices"] = []
+    await entry.runtime_data.devices.async_refresh()
+    assert hass.states.get("switch.decent_power").state == "unavailable"
+    payloads["devices"] = [{"type": "machine", "state": "connected"}]
+    await entry.runtime_data.devices.async_refresh()
+    assert hass.states.get("switch.decent_power").state == "off"
+
+
+async def test_wake_during_pending_sleep_uses_reported_state(hass, setup_entry, payloads):
+    entry, power = setup_entry
+    payloads["machine/state"] = {"state": {"state": "idle"}}
+    await entry.runtime_data.machine.async_refresh()
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": "switch.decent_power"}, blocking=True
+    )
+    assert hass.states.get("switch.decent_power").state == "off"
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": "switch.decent_power"}, blocking=True
+    )
+    # An optimistic sleep display must not cause idle to interrupt an awake machine.
+    power.assert_awaited_once_with(False)
+    assert hass.states.get("switch.decent_power").state == "on"

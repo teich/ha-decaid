@@ -12,6 +12,8 @@ Plain REST YAML works for readings and wake/sleep control, but it doesn't group 
 - State, substate, temperatures, pressure, flow, and their targets, polled every 10 seconds.
 - Profile, dose/yield targets, tablet battery, and machine/scale connectivity, polled every 60 seconds.
 
+After a successful wake/sleep command, the switch shows the requested state while the machine catches up, for up to 20 seconds. Polling then confirms it or restores the reported state.
+
 REST only for now. The sleep command can interrupt a running operation.
 
 ## Install
