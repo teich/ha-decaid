@@ -254,6 +254,8 @@ async def test_pending_power_connection_loss(hass, setup_entry, payloads):
     assert hass.states.get("switch.decent_power").state == "unavailable"
     payloads["devices"] = [{"type": "machine", "state": "connected"}]
     await entry.runtime_data.devices.async_refresh()
+    assert hass.states.get("switch.decent_power").state == "unavailable"
+    await entry.runtime_data.machine.async_refresh()
     assert hass.states.get("switch.decent_power").state == "off"
 
 
@@ -318,3 +320,46 @@ async def test_adaptive_polling_backs_off_on_failure(hass, setup_entry, payloads
     payloads["machine/state"] = {"state": {"state": "idle", "substate": "idle"}}
     await coordinator.async_refresh()
     assert coordinator.update_interval.total_seconds() == 2
+
+
+async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_start):
+    import asyncio
+    import json
+
+    from aiohttp import WSMessage, WSMsgType
+
+    mock_stream_start.side_effect = mock_stream_start.real_start
+    queues = {"machine/snapshot": asyncio.Queue(), "devices": asyncio.Queue()}
+    sockets = {}
+    for path, queue in queues.items():
+        socket = AsyncMock()
+        socket.receive.side_effect = queue.get
+        sockets[path] = socket
+    queues["machine/snapshot"].put_nowait(
+        WSMessage(WSMsgType.TEXT, json.dumps({"state": {"state": "heating"}}), "")
+    )
+    queues["devices"].put_nowait(
+        WSMessage(WSMsgType.TEXT, json.dumps({"devices": payloads["devices"]}), "")
+    )
+    entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
+    entry.add_to_hass(hass)
+    with (
+        patch(
+            "custom_components.decaid.api.DecaidClient.get", side_effect=lambda path: payloads[path]
+        ),
+        patch(
+            "custom_components.decaid.api.DecaidClient.connect_stream",
+            side_effect=lambda path: sockets[path],
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert hass.states.get("sensor.decent_state").state == "heating"
+        assert hass.states.get("switch.decent_power").state == "on"
+        tasks = [entry.runtime_data.machine.stream._task, entry.runtime_data.devices.stream._task]
+        assert all(task is not None and not task.done() for task in tasks)
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert all(task.done() for task in tasks)
+        for socket in sockets.values():
+            socket.close.assert_awaited_once()

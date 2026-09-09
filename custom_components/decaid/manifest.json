@@ -7,8 +7,8 @@
   "config_flow": true,
   "documentation": "https://github.com/teich/ha-decaid#readme",
   "integration_type": "device",
-  "iot_class": "local_polling",
+  "iot_class": "local_push",
   "requirements": [],
-  "version": "0.1.2",
+  "version": "0.2.0",
   "issue_tracker": "https://github.com/teich/ha-decaid/issues"
 }

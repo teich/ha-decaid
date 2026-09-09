@@ -4,12 +4,12 @@ import asyncio
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import DecaidClient
-from .const import PLATFORMS
-from .coordinator import DecaidCoordinator, DecaidData
+from .const import CONF_MACHINE_ID, PLATFORMS
+from .coordinator import DecaidCoordinator, DecaidData, DecaidPushCoordinator
 
 type DecaidConfigEntry = ConfigEntry[DecaidData]
 
@@ -21,19 +21,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bo
     )
     data = DecaidData(
         client,
-        DecaidCoordinator(hass, client, "machine/state", 10),
+        DecaidPushCoordinator(hass, client, "machine/state", 10, "machine/snapshot"),
         DecaidCoordinator(hass, client, "workflow", 60),
         DecaidCoordinator(hass, client, "settings", 60),
-        DecaidCoordinator(hass, client, "devices", 60),
+        DecaidPushCoordinator(hass, client, "devices", 60, "devices"),
     )
     await data.machine.async_config_entry_first_refresh()
     # Optional resources can recover after setup instead of blocking all entities.
     await asyncio.gather(*(c.async_refresh() for c in (data.workflow, data.settings, data.devices)))
     entry.runtime_data = data
+
+    @callback
+    def devices_updated():
+        if data.devices.last_update_success:
+            data.machine.set_machine_connected(
+                data.machine_connected(entry.data.get(CONF_MACHINE_ID))
+            )
+
+    entry.async_on_unload(data.devices.async_add_listener(devices_updated))
+    devices_updated()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    data.machine.start(entry)
+    data.devices.start(entry)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bool:
     """Unload platforms and their coordinator listeners."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    await asyncio.gather(entry.runtime_data.machine.stop(), entry.runtime_data.devices.stop())
+    return True

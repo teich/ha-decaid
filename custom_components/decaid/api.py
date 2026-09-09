@@ -1,14 +1,30 @@
-"""Small asynchronous client for Decaid's local REST API."""
+"""Asynchronous client for Decaid's local REST and WebSocket APIs."""
 
 import asyncio
 from typing import Any
 
-from aiohttp import ClientError, ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientSession, ClientTimeout, ClientWSTimeout
 from yarl import URL
 
 
 class DecaidError(Exception):
     """A request failed or returned an invalid payload."""
+
+
+def validate_payload(path: str, data: Any) -> dict | list:
+    """Share validation between REST snapshots and streamed payloads."""
+    expected = list if path == "devices" else dict
+    if not isinstance(data, expected):
+        raise DecaidError(f"Invalid response from {path}")
+    if path == "devices" and any(not isinstance(item, dict) for item in data):
+        raise DecaidError("Invalid device list")
+    if path == "machine/state" and (
+        not isinstance(data.get("state"), dict)
+        or not isinstance(data["state"].get("state"), str)
+        or not data["state"]["state"]
+    ):
+        raise DecaidError("Invalid machine state")
+    return data
 
 
 class DecaidClient:
@@ -38,14 +54,18 @@ class DecaidClient:
     async def get(self, path: str) -> dict | list:
         """Validate the endpoint's top-level response shape."""
         data = await self.request("GET", path)
-        expected = list if path == "devices" else dict
-        if not isinstance(data, expected):
-            raise DecaidError(f"Invalid response from {path}")
-        if path == "devices" and any(not isinstance(item, dict) for item in data):
-            raise DecaidError("Invalid device list")
-        if path == "machine/state" and not isinstance(data.get("state"), dict):
-            raise DecaidError("Invalid machine state")
-        return data
+        return validate_payload(path, data)
+
+    async def connect_stream(self, path: str):
+        """Open a socket; the stream owner handles ping/pong and cleanup."""
+        url = self.base_url.with_scheme("ws") / "ws" / "v1" / path
+        async with asyncio.timeout(10):
+            return await self.session.ws_connect(
+                url,
+                autoping=False,
+                timeout=ClientWSTimeout(ws_close=5),
+                max_msg_size=1024 * 1024,
+            )
 
     async def set_power(self, awake: bool) -> None:
         """Request wake or sleep; never start brewing."""
