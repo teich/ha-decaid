@@ -53,6 +53,15 @@ class DecaidStream:
                 pending_ping = None
                 while not self._stopped:
                     now = monotonic()
+                    # Control traffic proves transport health, not snapshot
+                    # freshness. Check this even when receive() never times out.
+                    expects_data = (
+                        self.coordinator.machine_connected
+                        if self.path == "machine/snapshot"
+                        else not self.active
+                    )
+                    if expects_data and now - self.received_at >= STALE_SECONDS:
+                        raise DecaidError("Stream stopped delivering snapshots")
                     if pending_ping is not None and now - pending_ping >= PONG_TIMEOUT:
                         raise DecaidError("WebSocket heartbeat timed out")
                     if pending_ping is None and now >= next_ping:
@@ -64,16 +73,6 @@ class DecaidStream:
                         async with asyncio.timeout(RECEIVE_CHECK_SECONDS):
                             message = await socket.receive()
                     except TimeoutError:
-                        # Devices is event-driven, so ping/pong is enough after
-                        # its initial snapshot. Machine telemetry should keep
-                        # arriving only while a machine is attached.
-                        expects_data = (
-                            self.coordinator.machine_connected
-                            if self.path == "machine/snapshot"
-                            else not self.active
-                        )
-                        if expects_data and monotonic() - self.received_at >= STALE_SECONDS:
-                            raise DecaidError("Stream stopped delivering snapshots")
                         continue
                     if message.type == WSMsgType.PING:
                         async with asyncio.timeout(5):

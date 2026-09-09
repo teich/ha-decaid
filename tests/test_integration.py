@@ -66,6 +66,41 @@ async def test_entities(hass, setup_entry):
     assert entry.runtime_data.settings.update_interval.total_seconds() == 60
 
 
+async def test_only_changed_entities_write_state(hass, setup_entry, payloads, freezer):
+    from datetime import timedelta
+
+    entry, _ = setup_entry
+    temperature_id = "sensor.decent_grouphead_temperature"
+    state_id = "sensor.decent_state"
+    connection_id = "binary_sensor.decent_machine_connected"
+    temperature = hass.states.get(temperature_id)
+    state = hass.states.get(state_id)
+    connection = hass.states.get(connection_id)
+    freezer.tick(timedelta(seconds=1))
+    # Timestamp and unrelated device metadata do not change entity values.
+    payloads["machine/state"] = {**payloads["machine/state"], "timestamp": "new"}
+    payloads["devices"] = [{**device, "name": "new"} for device in payloads["devices"]]
+    await entry.runtime_data.machine.async_refresh()
+    await entry.runtime_data.devices.async_refresh()
+    assert hass.states.get(temperature_id).last_reported == temperature.last_reported
+    assert hass.states.get(state_id).last_reported == state.last_reported
+    assert hass.states.get(connection_id).last_reported == connection.last_reported
+
+    payloads["machine/state"] = {**payloads["machine/state"], "groupTemperature": 95}
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get(temperature_id).state == "95.0"
+    assert hass.states.get(temperature_id).last_reported > temperature.last_reported
+    assert hass.states.get(state_id).last_reported == state.last_reported
+
+    good = payloads["machine/state"]
+    payloads["machine/state"] = DecaidError("offline")
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get(temperature_id).state == "unavailable"
+    payloads["machine/state"] = good
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get(temperature_id).state == "95.0"
+
+
 async def test_power_guard_and_errors(hass, setup_entry, payloads):
     entry, power = setup_entry
 

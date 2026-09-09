@@ -1,5 +1,6 @@
 """Shared entity identity."""
 
+from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -21,3 +22,15 @@ class DecaidEntity(CoordinatorEntity):
             model="Decaid",
             configuration_url=str(entry.runtime_data.client.base_url),
         )
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        self._last_coordinator_state = (self.available, self.state)
+
+    @callback
+    def _handle_coordinator_update(self):
+        """Write only when this entity's value or availability changes."""
+        state = (self.available, self.state)
+        if state != self._last_coordinator_state:
+            self._last_coordinator_state = state
+            self.async_write_ha_state()

@@ -58,7 +58,9 @@ class DecaidPower(DecaidEntity, SwitchEntity):
             not self.available or (self.state_value != "sleeping") == self._pending_power
         ):
             self._clear_transition()
-        super()._handle_coordinator_update()
+        # Commands also write optimistic states outside coordinator callbacks;
+        # always reconcile them instead of using the read-only entity cache.
+        self.async_write_ha_state()
 
     @property
     def state_value(self):

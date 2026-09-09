@@ -344,3 +344,126 @@ async def test_late_rest_cannot_rewind_frame_even_after_socket_closes(coordinato
     finish.set()
     await task
     assert coordinator.data["state"]["state"] == "espresso"
+
+
+@pytest.mark.parametrize("rest_fails", [False, True])
+@pytest.mark.parametrize("fresh_push", [False, True])
+async def test_rest_crossing_reconnect_requires_fresh_data(coordinator, rest_fails, fresh_push):
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def rest(_path):
+        started.set()
+        await finish.wait()
+        if rest_fails:
+            raise DecaidError("old request failed")
+        return snapshot("idle", 80)
+
+    coordinator.client.get.side_effect = rest
+    task = asyncio.create_task(coordinator.async_refresh())
+    await started.wait()
+    coordinator.set_machine_connected(False)
+    coordinator.set_machine_connected(True)
+    if fresh_push:
+        push(coordinator, snapshot("espresso", 93))
+    finish.set()
+    await task
+    assert coordinator.last_update_success is fresh_push
+    if fresh_push:
+        assert coordinator.data == snapshot("espresso", 93)
+    else:
+        # A request begun after reconnect can recover normally.
+        coordinator.client.get.side_effect = None
+        coordinator.client.get.return_value = snapshot("heating", 85)
+        await coordinator.async_refresh()
+        assert coordinator.last_update_success
+        assert coordinator.data == snapshot("heating", 85)
+
+
+@pytest.mark.parametrize("frame_type", [WSMsgType.PING, WSMsgType.PONG])
+@pytest.mark.parametrize(
+    ("path", "connected", "initial_snapshot", "should_fail"),
+    [
+        ("machine/state", True, True, True),
+        ("machine/state", False, False, False),
+        ("devices", True, False, True),
+        ("devices", True, True, False),
+    ],
+)
+async def test_control_frames_do_not_refresh_snapshots(
+    hass, frame_type, path, connected, initial_snapshot, should_fail
+):
+    socket = Socket()
+    client = MagicMock(connect_stream=AsyncMock(return_value=socket))
+    c = DecaidPushCoordinator(
+        hass, client, path, 10, "devices" if path == "devices" else "machine/snapshot"
+    )
+    c.set_machine_connected(connected)
+    now = 0
+    sent_initial = False
+    checked, fallback = asyncio.Event(), asyncio.Event()
+
+    async def receive():
+        nonlocal now, sent_initial
+        if initial_snapshot and not sent_initial:
+            sent_initial = True
+            return message({"devices": []} if path == "devices" else snapshot())
+        if now >= 40:
+            checked.set()
+            return await socket.queue.get()
+        now += 1
+        # No receive timeout, even though application data has stopped.
+        await asyncio.sleep(0)
+        return WSMessage(frame_type, b"decaid", "")
+
+    socket.receive = receive
+    c.async_stream_failed = AsyncMock(side_effect=fallback.set)
+    with (
+        patch("custom_components.decaid.stream.monotonic", side_effect=lambda: now),
+        # Keep transport healthy for both PING-only and PONG-only cases.
+        patch("custom_components.decaid.stream.PING_INTERVAL", 100),
+    ):
+        c.stream._task = asyncio.create_task(c.stream._run())
+        try:
+            await asyncio.wait_for((fallback if should_fail else checked).wait(), 2)
+            if should_fail:
+                assert now == 15
+                socket.close.assert_awaited_once()
+            else:
+                socket.close.assert_not_awaited()
+                c.async_stream_failed.assert_not_awaited()
+        finally:
+            await c.stop()
+            await c.async_shutdown()
+
+
+async def test_unchanged_pushes_keep_watchdog_fresh_without_notifications(
+    hass, coordinator, freezer
+):
+    listener = MagicMock()
+    unsub = coordinator.async_add_listener(listener)
+    try:
+        push(coordinator, snapshot())
+        listener.assert_called_once()
+        listener.reset_mock()
+        for _ in range(20):
+            freezer.tick(timedelta(seconds=1))
+            push(coordinator, snapshot())
+            async_fire_time_changed(hass, dt_util.utcnow())
+            await hass.async_block_till_done()
+        listener.assert_not_called()
+        coordinator.client.get.assert_awaited_once()  # Startup only.
+        coordinator.set_machine_connected(False)
+        coordinator.set_machine_connected(True)
+        listener.reset_mock()
+        push(coordinator, snapshot())
+        listener.assert_called_once()  # Equal values still restore availability.
+        assert coordinator.last_update_success
+        coordinator.stream.active = False
+        coordinator.client.get.return_value = snapshot("sleeping")
+        freezer.tick(timedelta(seconds=16))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert coordinator.data == snapshot("sleeping")
+        assert coordinator.client.get.await_count == 2
+    finally:
+        unsub()

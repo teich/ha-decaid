@@ -59,6 +59,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
         self.machine_connected = True
         self._latest = None
         self._revision = 0
+        self._connection_generation = 0
         self._published_at = 0.0
         self._cancel_publish = None
         self._stopped = False
@@ -82,6 +83,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
         if connected == self.machine_connected:
             return
         self.machine_connected = connected
+        self._connection_generation += 1
         self._latest = None
         self._revision += 1
         self._cancel_pending_publish()
@@ -110,11 +112,13 @@ class DecaidPushCoordinator(DecaidCoordinator):
         if self._stopped or self._latest is None or not self.machine_connected:
             return
         self._published_at = monotonic()
-        # Continuous pushes postpone this watchdog. A silent machine falls
-        # back to REST; the devices socket is allowed to remain event-driven.
+        # Changed pushes postpone this watchdog. Unchanged fresh frames satisfy
+        # it from the cache; a silent machine falls back to REST.
         self.update_interval = timedelta(
             seconds=STALE_SECONDS if self.path == "machine/state" else 60
         )
+        if self.last_update_success and self._latest == self.data:
+            return
         self.async_set_updated_data(self._latest)
 
     @callback
@@ -142,6 +146,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
             # Fresh push data also satisfies command preflight reads.
             return self._latest
         revision = self._revision
+        connection_generation = self._connection_generation
         try:
             data = await super()._async_update_data()
         except UpdateFailed:
@@ -150,6 +155,9 @@ class DecaidPushCoordinator(DecaidCoordinator):
             data = self._latest
         if not self.machine_connected:
             raise UpdateFailed("Machine disconnected")
+        if connection_generation != self._connection_generation and self._latest is None:
+            # Only a snapshot from the current connection can restore availability.
+            raise UpdateFailed("Machine connection changed during refresh")
         if self._revision != revision and self._latest is not None:
             # A REST response started before a push must never rewind state.
             data = self._latest
