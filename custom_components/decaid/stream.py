@@ -55,12 +55,10 @@ class DecaidStream:
                     now = monotonic()
                     # Control traffic proves transport health, not snapshot
                     # freshness. Check this even when receive() never times out.
-                    expects_data = (
-                        self.coordinator.machine_connected
-                        if self.path in ("machine/snapshot", "machine/waterLevels")
-                        else not self.active
-                    )
-                    if expects_data and now - self.received_at >= STALE_SECONDS:
+                    if (
+                        self.coordinator.expects_stream_data
+                        and now - self.received_at >= STALE_SECONDS
+                    ):
                         raise DecaidError("Stream stopped delivering snapshots")
                     if pending_ping is not None and now - pending_ping >= PONG_TIMEOUT:
                         raise DecaidError("WebSocket heartbeat timed out")
@@ -90,9 +88,18 @@ class DecaidStream:
                             raise DecaidError("Invalid devices stream snapshot")
                         payload = payload["devices"]
                     data = validate_payload(self.coordinator.path, payload)
+                    if self.path == "scale/snapshot" and "status" in data:
+                        was_connected = self.coordinator.device_connected
+                        self.coordinator.set_device_connected(data["status"] == "connected")
+                        if not was_connected and self.coordinator.device_connected:
+                            self.received_at = monotonic()
+                        # Status is not a weight reading and repeated statuses
+                        # must not keep stale measurements available.
+                        continue
+                    initial = not self.active
                     self.received_at = monotonic()
                     self.active = True
-                    self.coordinator.async_receive(data)
+                    self.coordinator.async_receive(data, initial=initial)
             except (ClientError, OSError, TimeoutError, ValueError, DecaidError) as err:
                 _LOGGER.debug("Decaid %s stream interrupted: %s", self.path, err)
             finally:

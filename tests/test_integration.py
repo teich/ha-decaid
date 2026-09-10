@@ -57,7 +57,7 @@ async def setup_entry(hass, payloads):
 
 async def test_entities(hass, setup_entry):
     entry, _ = setup_entry
-    assert len(hass.states.async_all()) == 20
+    assert len(hass.states.async_all()) == 28
     assert hass.states.get("sensor.decent_water_level").state == "unavailable"
     assert hass.states.get("sensor.decent_refill_threshold").state == "unavailable"
     assert hass.states.get("sensor.decent_grouphead_temperature").state == "92.4"
@@ -359,7 +359,7 @@ async def test_adaptive_polling_backs_off_on_failure(hass, setup_entry, payloads
     assert coordinator.update_interval.total_seconds() == 2
 
 
-async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_start):
+async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_start, shot_payload):
     import asyncio
     import json
 
@@ -367,7 +367,14 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
 
     mock_stream_start.side_effect = mock_stream_start.real_start
     queues = {
-        path: asyncio.Queue() for path in ("machine/snapshot", "devices", "machine/waterLevels")
+        path: asyncio.Queue()
+        for path in (
+            "machine/snapshot",
+            "devices",
+            "machine/waterLevels",
+            "scale/snapshot",
+            "machine/shotState",
+        )
     }
     sockets = {}
     for path, queue in queues.items():
@@ -383,6 +390,17 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
     queues["machine/waterLevels"].put_nowait(
         WSMessage(WSMsgType.TEXT, json.dumps({"currentLevel": 28.3, "refillLevel": 5}), "")
     )
+    queues["scale/snapshot"].put_nowait(
+        WSMessage(WSMsgType.TEXT, json.dumps({"status": "connected"}), "")
+    )
+    queues["scale/snapshot"].put_nowait(
+        WSMessage(
+            WSMsgType.TEXT,
+            json.dumps({"weight": 36.2, "weightFlow": 1.5, "battery": 50, "timerValue": 25000}),
+            "",
+        )
+    )
+    queues["machine/shotState"].put_nowait(WSMessage(WSMsgType.TEXT, json.dumps(shot_payload), ""))
     entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
     entry.add_to_hass(hass)
     with (
@@ -400,23 +418,101 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
         assert hass.states.get("switch.decent_power").state == "on"
         assert hass.states.get("sensor.decent_water_level").state == "28.3"
         assert hass.states.get("sensor.decent_refill_threshold").state == "5.0"
+        assert hass.states.get("sensor.decent_scale_weight").state == "36.2"
+        assert hass.states.get("sensor.decent_scale_weight_flow").state == "1.5"
+        assert hass.states.get("sensor.decent_scale_battery").state == "50.0"
+        assert hass.states.get("sensor.decent_scale_timer").state == "25000.0"
+        assert (
+            hass.states.get("sensor.decent_scale_timer").attributes["unit_of_measurement"] == "ms"
+        )
+        assert hass.states.get("sensor.decent_shot_phase").state == "idle"
+        assert hass.states.get("event.decent_shot_event").state == "unknown"  # Initial replay.
         assert (
             hass.states.get("sensor.decent_water_level").attributes["unit_of_measurement"] == "mm"
         )
-        tasks = [
-            c.stream._task
-            for c in (
-                entry.runtime_data.machine,
-                entry.runtime_data.devices,
-                entry.runtime_data.water,
-            )
-        ]
+        tasks = [c.stream._task for c in entry.runtime_data.streams]
         assert all(task is not None and not task.done() for task in tasks)
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
         assert all(task.done() for task in tasks)
         for socket in sockets.values():
             socket.close.assert_awaited_once()
+
+
+async def test_shot_events_preserve_rapid_decisions_and_ignore_replay(
+    hass, setup_entry, shot_payload
+):
+    from time import monotonic
+
+    from homeassistant.helpers.event import async_track_state_change_event
+
+    entry, _ = setup_entry
+    shot = entry.runtime_data.shot
+    shot.stream.active = True
+    shot.stream.received_at = monotonic()
+    shot.async_receive(shot_payload, initial=True)
+    event_id = "event.decent_shot_event"
+    events = []
+    unsub = async_track_state_change_event(hass, [event_id], events.append)
+    try:
+        for kind, reason, phase in (
+            ("advance", "profileSkip", "pouring"),
+            ("stop", "targetWeight", "stopping"),
+            ("finalize", "futureReason", "finished"),
+        ):
+            shot.async_receive(
+                {
+                    **shot_payload,
+                    "event": "decision",
+                    "shotId": "shot-1",
+                    "state": phase,
+                    "scaleLost": True,
+                    "decision": {"kind": kind, "reason": reason},
+                }
+            )
+        await hass.async_block_till_done()
+        assert [e.data["new_state"].attributes["decision"]["reason"] for e in events] == [
+            "profileSkip",
+            "targetWeight",
+            "futureReason",
+        ]
+        assert hass.states.get("sensor.decent_shot_phase").state == "finished"
+        assert hass.states.get("sensor.decent_last_shot_stop_reason").state == "targetWeight"
+        assert hass.states.get("binary_sensor.decent_scale_lost_during_shot").state == "on"
+        events.clear()
+        shot.async_receive(shot.data)
+        shot.async_receive(shot.data)
+        await hass.async_block_till_done()
+        assert len(events) == 2  # Identical consecutive events still arrive individually.
+        last_event_time = hass.states.get(event_id).state
+        shot.async_stream_lost()
+        assert hass.states.get(event_id).state == "unavailable"
+        shot.async_receive(shot_payload, initial=True)
+        assert hass.states.get(event_id).state == last_event_time
+        assert hass.states.get("binary_sensor.decent_scale_lost_during_shot").state == "off"
+        assert hass.states.get("sensor.decent_shot_phase").state == "idle"
+    finally:
+        unsub()
+
+
+async def test_scale_optional_values_and_disconnect(hass, setup_entry):
+    from time import monotonic
+
+    entry, _ = setup_entry
+    scale = entry.runtime_data.scale
+    scale.stream.active = True
+    scale.stream.received_at = monotonic()
+    scale.async_receive({"weight": 0, "weightFlow": 0, "battery": None, "timerValue": None})
+    assert hass.states.get("sensor.decent_scale_weight").state == "0.0"
+    assert hass.states.get("sensor.decent_scale_battery").state == "unknown"
+    assert hass.states.get("sensor.decent_scale_timer").state == "unknown"
+    scale.set_device_connected(False)
+    assert hass.states.get("sensor.decent_scale_weight").state == "unavailable"
+    assert hass.states.get("sensor.decent_state").state == "sleeping"
+    scale.set_device_connected(True)
+    assert hass.states.get("sensor.decent_scale_weight").state == "unavailable"
+    scale.async_receive({"weight": 1.2, "weightFlow": 0})
+    assert hass.states.get("sensor.decent_scale_weight").state == "1.2"
 
 
 async def test_water_entity_disconnect_recovery_and_unchanged_threshold(

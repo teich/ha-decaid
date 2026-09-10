@@ -15,6 +15,7 @@ from homeassistant.const import (
     UnitOfMass,
     UnitOfPressure,
     UnitOfTemperature,
+    UnitOfTime,
 )
 
 from .entity import DecaidEntity
@@ -30,6 +31,60 @@ class DecaidSensorDescription(SensorEntityDescription):
 
 
 SENSORS = [
+    DecaidSensorDescription(
+        key="scale_weight",
+        name="Scale weight",
+        source="scale",
+        path=("weight",),
+        numeric=True,
+        native_unit_of_measurement=UnitOfMass.GRAMS,
+        device_class=SensorDeviceClass.WEIGHT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+    ),
+    DecaidSensorDescription(
+        key="scale_weight_flow",
+        name="Scale weight flow",
+        source="scale",
+        path=("weightFlow",),
+        numeric=True,
+        native_unit_of_measurement="g/s",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:water",
+    ),
+    DecaidSensorDescription(
+        key="scale_battery",
+        name="Scale battery",
+        source="scale",
+        path=("battery",),
+        numeric=True,
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    DecaidSensorDescription(
+        key="scale_timer",
+        name="Scale timer",
+        source="scale",
+        path=("timerValue",),
+        numeric=True,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        device_class=SensorDeviceClass.DURATION,
+    ),
+    DecaidSensorDescription(
+        key="shot_phase",
+        name="Shot phase",
+        source="shot",
+        path=("state",),
+        icon="mdi:coffee-maker",
+    ),
+    DecaidSensorDescription(
+        key="last_shot_stop_reason",
+        name="Last shot stop reason",
+        source="shot",
+        path=("stopReason",),
+        icon="mdi:information-outline",
+    ),
     DecaidSensorDescription(
         key="state", name="State", path=("state", "state"), icon="mdi:coffee-maker"
     ),

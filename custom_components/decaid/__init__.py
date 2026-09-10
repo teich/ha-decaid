@@ -13,6 +13,8 @@ from .coordinator import (
     DecaidCoordinator,
     DecaidData,
     DecaidPushCoordinator,
+    DecaidShotCoordinator,
+    DecaidStreamCoordinator,
     DecaidWaterCoordinator,
 )
 
@@ -31,6 +33,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bo
         DecaidCoordinator(hass, client, "settings", 60),
         DecaidPushCoordinator(hass, client, "devices", 60, "devices"),
         DecaidWaterCoordinator(hass, client),
+        DecaidStreamCoordinator(hass, client, "scale/snapshot"),
+        DecaidShotCoordinator(hass, client),
     )
     await data.machine.async_config_entry_first_refresh()
     # Optional resources can recover after setup instead of blocking all entities.
@@ -41,15 +45,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bo
     def devices_updated():
         if data.devices.last_update_success:
             connected = data.machine_connected(entry.data.get(CONF_MACHINE_ID))
-            data.machine.set_machine_connected(connected)
-            data.water.set_machine_connected(connected)
+            data.machine.set_device_connected(connected)
+            data.water.set_device_connected(connected)
 
     entry.async_on_unload(data.devices.async_add_listener(devices_updated))
     devices_updated()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    data.machine.start(entry)
-    data.devices.start(entry)
-    data.water.start(entry)
+    for coordinator in data.streams:
+        coordinator.start(entry)
     return True
 
 
@@ -57,9 +60,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> b
     """Unload platforms and their coordinator listeners."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    await asyncio.gather(
-        entry.runtime_data.machine.stop(),
-        entry.runtime_data.devices.stop(),
-        entry.runtime_data.water.stop(),
-    )
+    await asyncio.gather(*(coordinator.stop() for coordinator in entry.runtime_data.streams))
     return True

@@ -62,3 +62,45 @@ async def test_timeout_and_bad_json(error):
     client = DecaidClient(session, "192.168.2.231", 8080)
     with pytest.raises(DecaidError):
         await client.get("settings")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"status": "unknown"},
+        {"weight": True, "weightFlow": 0},
+        {"weight": 0, "weightFlow": float("nan")},
+        {"weight": 0, "weightFlow": 0, "battery": "50"},
+        {"weight": 0, "weightFlow": 0, "timerValue": float("inf")},
+    ],
+)
+def test_invalid_scale_payload(payload):
+    with pytest.raises(DecaidError):
+        validate_payload("scale/snapshot", payload)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"event": "bogus"},
+        {"state": {}},
+        {"timestamp": None},
+        {"scaleLost": "false"},
+        {"shotId": 123},
+        {"decision": []},
+        {"decision": {"kind": "stop", "reason": 123}},
+    ],
+)
+def test_invalid_shot_payload(shot_payload, changes):
+    with pytest.raises(DecaidError):
+        validate_payload("machine/shotState", {**shot_payload, **changes})
+
+
+def test_unknown_shot_decision_reason_is_supported(shot_payload):
+    payload = {
+        **shot_payload,
+        "event": "decision",
+        "decision": {"kind": "stop", "reason": "newFirmwareReason"},
+    }
+    assert validate_payload("machine/shotState", payload) == payload

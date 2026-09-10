@@ -12,6 +12,15 @@ class DecaidError(Exception):
     """A request failed or returned an invalid payload."""
 
 
+def _is_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def validate_payload(path: str, data: Any) -> dict | list:
     """Share validation between REST snapshots and streamed payloads."""
     expected = list if path == "devices" else dict
@@ -26,12 +35,39 @@ def validate_payload(path: str, data: Any) -> dict | list:
     ):
         raise DecaidError("Invalid machine state")
     if path == "machine/waterLevels" and any(
-        isinstance(data.get(key), bool)
-        or not isinstance(data.get(key), (int, float))
-        or not math.isfinite(data[key])
-        for key in ("currentLevel", "refillLevel")
+        not _is_number(data.get(key)) for key in ("currentLevel", "refillLevel")
     ):
         raise DecaidError("Invalid water levels")
+    if path == "scale/snapshot":
+        if "status" in data:
+            if data["status"] not in ("connected", "disconnected"):
+                raise DecaidError("Invalid scale status")
+        elif any(not _is_number(data.get(key)) for key in ("weight", "weightFlow")) or any(
+            data.get(key) is not None and not _is_number(data[key])
+            for key in ("battery", "timerValue")
+        ):
+            raise DecaidError("Invalid scale snapshot")
+    if path == "machine/shotState":
+        if (
+            data.get("event") not in ("state", "decision", "terminal")
+            or any(
+                not isinstance(data.get(key), str) or not data[key]
+                for key in ("state", "timestamp")
+            )
+            or any(
+                not isinstance(data.get(key), bool)
+                for key in ("scaleConnected", "scaleLost", "machineHasAutonomousSAW")
+            )
+            or (data.get("shotId") is not None and not isinstance(data["shotId"], str))
+        ):
+            raise DecaidError("Invalid shot event")
+        decision = data.get("decision")
+        if decision is not None and (
+            not isinstance(decision, dict)
+            or not isinstance(decision.get("kind"), str)
+            or not isinstance(decision.get("reason"), str)
+        ):
+            raise DecaidError("Invalid shot decision")
     return data
 
 

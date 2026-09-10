@@ -7,7 +7,26 @@ from .entity import DecaidEntity
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    async_add_entities(DecaidConnection(entry, kind) for kind in ("machine", "scale"))
+    async_add_entities(
+        [
+            *(DecaidConnection(entry, kind) for kind in ("machine", "scale")),
+            DecaidScaleLost(entry),
+        ]
+    )
+
+
+class DecaidScaleLost(DecaidEntity, BinarySensorEntity):
+    """Sequencer-reported scale loss, sticky for the remainder of the shot."""
+
+    _attr_name = "Scale lost during shot"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, entry):
+        super().__init__(entry.runtime_data.shot, entry, "scale_lost_during_shot")
+
+    @property
+    def is_on(self):
+        return (self.coordinator.data or {}).get("scaleLost", False)
 
 
 class DecaidConnection(DecaidEntity, BinarySensorEntity):

@@ -56,13 +56,21 @@ class DecaidPushCoordinator(DecaidCoordinator):
     def __init__(self, hass, client, path, seconds, stream_path):
         super().__init__(hass, client, path, seconds)
         self.stream = DecaidStream(self, stream_path)
-        self.machine_connected = True
+        self.device_connected = True
         self._latest = None
         self._revision = 0
         self._connection_generation = 0
         self._published_at = 0.0
         self._cancel_publish = None
         self._stopped = False
+
+    @property
+    def event_driven(self):
+        return self.path in ("devices", "machine/shotState")
+
+    @property
+    def expects_stream_data(self):
+        return not self.stream.active if self.event_driven else self.device_connected
 
     def start(self, entry):
         self.stream.start(entry)
@@ -79,21 +87,21 @@ class DecaidPushCoordinator(DecaidCoordinator):
             self._cancel_publish = None
 
     @callback
-    def set_machine_connected(self, connected):
-        if connected == self.machine_connected:
+    def set_device_connected(self, connected):
+        if connected == self.device_connected:
             return
-        self.machine_connected = connected
+        self.device_connected = connected
         self._connection_generation += 1
         self._latest = None
         self._revision += 1
         self._cancel_pending_publish()
         if not connected:
-            self.async_set_update_error(UpdateFailed("Machine disconnected"))
+            self.async_set_update_error(UpdateFailed("Device disconnected"))
 
     @callback
-    def async_receive(self, data):
+    def async_receive(self, data, *, initial=False):
         """Remember every frame, publish state changes immediately and numbers at 1 Hz."""
-        if self._stopped or not self.machine_connected:
+        if self._stopped or not self.device_connected:
             return
         self._latest = data
         self._revision += 1
@@ -109,7 +117,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
     @callback
     def _publish(self, _now=None):
         self._cancel_pending_publish()
-        if self._stopped or self._latest is None or not self.machine_connected:
+        if self._stopped or self._latest is None or not self.device_connected:
             return
         self._published_at = monotonic()
         # Changed pushes postpone this watchdog. Unchanged fresh frames satisfy
@@ -133,7 +141,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
             await self.async_refresh()
 
     async def _async_update_data(self):
-        if not self.machine_connected:
+        if not self.device_connected:
             self.update_interval = timedelta(seconds=10)
             raise UpdateFailed("Machine disconnected")
         if (
@@ -151,7 +159,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
             if self._revision == revision or self._latest is None or not self.stream.active:
                 raise
             data = self._latest
-        if not self.machine_connected:
+        if not self.device_connected:
             raise UpdateFailed("Machine disconnected")
         if connection_generation != self._connection_generation and self._latest is None:
             # Only a snapshot from the current connection can restore availability.
@@ -162,28 +170,59 @@ class DecaidPushCoordinator(DecaidCoordinator):
         return data
 
 
-class DecaidWaterCoordinator(DecaidPushCoordinator):
-    """Water levels have a stream but no REST GET endpoint."""
+class DecaidStreamCoordinator(DecaidPushCoordinator):
+    """Optional telemetry without a REST fallback."""
 
-    def __init__(self, hass, client):
-        super().__init__(hass, client, "machine/waterLevels", STALE_SECONDS, "machine/waterLevels")
+    def __init__(self, hass, client, path):
+        super().__init__(hass, client, path, STALE_SECONDS, path)
         self.last_update_success = False
 
     @callback
     def async_stream_lost(self):
         super().async_stream_lost()
         if not self._stopped:
-            self.async_set_update_error(UpdateFailed("Water level stream unavailable"))
+            self.async_set_update_error(UpdateFailed(f"{self.path} stream unavailable"))
 
     async def _async_update_data(self):
         if (
-            not self.machine_connected
+            not self.device_connected
             or not self.stream.active
             or self._latest is None
-            or monotonic() - self.stream.received_at >= STALE_SECONDS
+            or (not self.event_driven and monotonic() - self.stream.received_at >= STALE_SECONDS)
         ):
-            raise UpdateFailed("Waiting for fresh water levels")
+            raise UpdateFailed(f"Waiting for fresh {self.path} data")
         return self._latest
+
+
+class DecaidWaterCoordinator(DecaidStreamCoordinator):
+    """Water levels have a stream but no REST GET endpoint."""
+
+    def __init__(self, hass, client):
+        super().__init__(hass, client, "machine/waterLevels")
+
+
+class DecaidShotCoordinator(DecaidStreamCoordinator):
+    """Publish every sequencer event; distinguish the initial replay from live events."""
+
+    def __init__(self, hass, client):
+        super().__init__(hass, client, "machine/shotState")
+        self.is_replay = True
+        self._stop_reason = None
+
+    @callback
+    def async_receive(self, data, *, initial=False):
+        if self._stopped:
+            return
+        self.is_replay = initial
+        decision = data.get("decision") or {}
+        if decision.get("kind") in ("stop", "abort", "terminal"):
+            self._stop_reason = decision.get("reason")
+        self._latest = {**data, "stopReason": self._stop_reason}
+        self._revision += 1
+        self.update_interval = timedelta(seconds=60)
+        # No coalescing or equality suppression: two successive decisions must
+        # remain two events even when their state or timestamp is identical.
+        self.async_set_updated_data(self._latest)
 
 
 @dataclass
@@ -196,6 +235,12 @@ class DecaidData:
     settings: DecaidCoordinator
     devices: DecaidPushCoordinator
     water: DecaidWaterCoordinator
+    scale: DecaidStreamCoordinator
+    shot: DecaidShotCoordinator
+
+    @property
+    def streams(self):
+        return (self.machine, self.devices, self.water, self.scale, self.shot)
 
     def machine_connected(self, machine_id: str | None) -> bool:
         return self.devices.last_update_success and any(

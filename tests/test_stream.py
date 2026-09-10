@@ -13,7 +13,12 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.decaid.api import DecaidClient, DecaidError
-from custom_components.decaid.coordinator import DecaidPushCoordinator, DecaidWaterCoordinator
+from custom_components.decaid.coordinator import (
+    DecaidPushCoordinator,
+    DecaidShotCoordinator,
+    DecaidStreamCoordinator,
+    DecaidWaterCoordinator,
+)
 
 
 def snapshot(state="idle", temp=90, substate="idle"):
@@ -111,13 +116,13 @@ async def test_failure_falls_back_and_push_recovers(coordinator):
 
 async def test_disconnect_blocks_telemetry_until_fresh_reconnect(coordinator):
     push(coordinator, snapshot("idle", 93))
-    coordinator.set_machine_connected(False)
+    coordinator.set_device_connected(False)
     assert not coordinator.last_update_success
     push(coordinator, snapshot("idle", 94))
     assert not coordinator.last_update_success
     await coordinator.async_refresh()
     assert not coordinator.last_update_success
-    coordinator.set_machine_connected(True)
+    coordinator.set_device_connected(True)
     assert not coordinator.last_update_success
     push(coordinator, snapshot("heating", 92))
     assert coordinator.last_update_success
@@ -230,7 +235,7 @@ async def test_silent_machine_only_reconnects_when_expected(coordinator, connect
         return await socket.queue.get()
 
     socket.receive = receive
-    coordinator.set_machine_connected(connected)
+    coordinator.set_device_connected(connected)
     coordinator.client.connect_stream = AsyncMock(return_value=socket)
     coordinator.async_stream_failed = AsyncMock(side_effect=lambda: fallback.set())
     with (
@@ -283,7 +288,7 @@ async def test_disconnect_during_rest_does_not_restore_old_state(coordinator):
     coordinator.client.get.side_effect = rest
     task = asyncio.create_task(coordinator.async_refresh())
     await started.wait()
-    coordinator.set_machine_connected(False)
+    coordinator.set_device_connected(False)
     finish.set()
     await task
     assert not coordinator.last_update_success
@@ -361,8 +366,8 @@ async def test_rest_crossing_reconnect_requires_fresh_data(coordinator, rest_fai
     coordinator.client.get.side_effect = rest
     task = asyncio.create_task(coordinator.async_refresh())
     await started.wait()
-    coordinator.set_machine_connected(False)
-    coordinator.set_machine_connected(True)
+    coordinator.set_device_connected(False)
+    coordinator.set_device_connected(True)
     if fresh_push:
         push(coordinator, snapshot("espresso", 93))
     finish.set()
@@ -387,19 +392,23 @@ async def test_rest_crossing_reconnect_requires_fresh_data(coordinator, rest_fai
         ("machine/state", False, False, False),
         ("machine/waterLevels", True, True, True),
         ("machine/waterLevels", False, False, False),
+        ("scale/snapshot", True, True, True),
+        ("scale/snapshot", False, False, False),
+        ("machine/shotState", True, False, True),
+        ("machine/shotState", True, True, False),
         ("devices", True, False, True),
         ("devices", True, True, False),
     ],
 )
 async def test_control_frames_do_not_refresh_snapshots(
-    hass, frame_type, path, connected, initial_snapshot, should_fail
+    hass, frame_type, path, connected, initial_snapshot, should_fail, shot_payload
 ):
     socket = Socket()
     client = MagicMock(connect_stream=AsyncMock(return_value=socket))
     c = DecaidPushCoordinator(
         hass, client, path, 10, "machine/snapshot" if path == "machine/state" else path
     )
-    c.set_machine_connected(connected)
+    c.set_device_connected(connected)
     now = 0
     sent_initial = False
     checked, fallback = asyncio.Event(), asyncio.Event()
@@ -410,6 +419,10 @@ async def test_control_frames_do_not_refresh_snapshots(
             sent_initial = True
             if path == "machine/waterLevels":
                 return message({"currentLevel": 28.3, "refillLevel": 5})
+            if path == "scale/snapshot":
+                return message({"weight": 0, "weightFlow": 0})
+            if path == "machine/shotState":
+                return message(shot_payload)
             return message({"devices": []} if path == "devices" else snapshot())
         if now >= 40:
             checked.set()
@@ -456,8 +469,8 @@ async def test_unchanged_pushes_keep_watchdog_fresh_without_notifications(
             await hass.async_block_till_done()
         listener.assert_not_called()
         coordinator.client.get.assert_awaited_once()  # Startup only.
-        coordinator.set_machine_connected(False)
-        coordinator.set_machine_connected(True)
+        coordinator.set_device_connected(False)
+        coordinator.set_device_connected(True)
         listener.reset_mock()
         push(coordinator, snapshot())
         listener.assert_called_once()  # Equal values still restore availability.
@@ -503,6 +516,76 @@ async def test_water_stream_failure_and_recovery_without_rest(hass, failure):
         await socket.queue.put(message({"currentLevel": 29, "refillLevel": 5}))
         assert await asyncio.wait_for(changes.get(), 3)
         assert c.data == {"currentLevel": 29, "refillLevel": 5}
+        client.get.assert_not_awaited()
+    finally:
+        unsub()
+        await c.stop()
+        await c.async_shutdown()
+
+
+async def test_scale_status_disconnect_and_reconnect_on_same_socket(hass):
+    client = MagicMock(get=AsyncMock())
+    c = DecaidStreamCoordinator(hass, client, "scale/snapshot")
+    socket = Socket()
+    client.connect_stream = AsyncMock(return_value=socket)
+    changes = asyncio.Queue()
+    unsub = c.async_add_listener(lambda: changes.put_nowait(c.last_update_success))
+    c.stream._task = asyncio.create_task(c.stream._run())
+    try:
+        await socket.queue.put(message({"status": "connected"}))
+        await socket.queue.put(message({"weight": 36, "weightFlow": 2}))
+        assert await asyncio.wait_for(changes.get(), 2)
+        # A queued numerical publication must not survive scale disconnect.
+        await socket.queue.put(message({"weight": 37, "weightFlow": 2}))
+        await socket.queue.put(message({"status": "disconnected"}))
+        assert not await asyncio.wait_for(changes.get(), 2)
+        assert c._cancel_publish is None
+        assert not c.device_connected
+        socket.close.assert_not_awaited()
+        await socket.queue.put(message({"status": "connected"}))
+        # Synchronize with the status handler before sending fresh telemetry.
+        await asyncio.sleep(0)
+        await c.async_refresh()
+        assert not c.last_update_success
+        await socket.queue.put(message({"weight": 1, "weightFlow": 0}))
+        assert await asyncio.wait_for(changes.get(), 2)
+        assert c.data["weight"] == 1
+        client.get.assert_not_awaited()
+        client.connect_stream.assert_awaited_once()
+    finally:
+        unsub()
+        await c.stop()
+        await c.async_shutdown()
+
+
+async def test_shot_socket_replay_and_quiet_watchdog(hass, shot_payload):
+    client = MagicMock(get=AsyncMock())
+    c = DecaidShotCoordinator(hass, client)
+    socket = Socket()
+    client.connect_stream = AsyncMock(return_value=socket)
+    changes = asyncio.Queue()
+    unsub = c.async_add_listener(lambda: changes.put_nowait((c.last_update_success, c.is_replay)))
+    c.stream._task = asyncio.create_task(c.stream._run())
+    try:
+        await socket.queue.put(message(shot_payload))
+        assert await asyncio.wait_for(changes.get(), 2) == (True, True)
+        c.stream.received_at -= 300  # Quiet idle is valid after the initial frame.
+        await c.async_refresh()
+        assert c.last_update_success
+        assert changes.empty()
+        terminal = {
+            **shot_payload,
+            "event": "terminal",
+            "state": "finished",
+            "decision": {"kind": "terminal", "reason": "disconnected"},
+        }
+        await socket.queue.put(message(terminal))
+        assert await asyncio.wait_for(changes.get(), 2) == (True, False)
+        await socket.queue.put(WSMessage(WSMsgType.CLOSED, None, None))
+        assert await asyncio.wait_for(changes.get(), 2) == (False, False)
+        await socket.queue.put(message(terminal))
+        assert await asyncio.wait_for(changes.get(), 3) == (True, True)
+        assert c.data["stopReason"] == "disconnected"
         client.get.assert_not_awaited()
     finally:
         unsub()
