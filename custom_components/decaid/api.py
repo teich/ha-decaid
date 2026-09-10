@@ -47,6 +47,19 @@ def validate_payload(path: str, data: Any) -> dict | list:
             for key in ("battery", "timerValue")
         ):
             raise DecaidError("Invalid scale snapshot")
+    if path == "machine/shotSettings" and any(
+        not _is_number(data.get(key))
+        for key in (
+            "targetSteamTemp",
+            "targetSteamDuration",
+            "targetHotWaterTemp",
+            "targetHotWaterVolume",
+            "targetHotWaterDuration",
+            "targetShotVolume",
+            "groupTemp",
+        )
+    ):
+        raise DecaidError("Invalid shot settings")
     if path == "machine/shotState":
         if (
             data.get("event") not in ("state", "decision", "terminal")

@@ -66,7 +66,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
 
     @property
     def event_driven(self):
-        return self.path in ("devices", "machine/shotState")
+        return self.path in ("devices", "machine/shotState", "machine/shotSettings")
 
     @property
     def expects_stream_data(self):
@@ -109,7 +109,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
             not self.data or data["state"] != self.data.get("state")
         )
         elapsed = monotonic() - self._published_at
-        if self.path == "devices" or state_changed or not self.last_update_success or elapsed >= 1:
+        if self.event_driven or state_changed or not self.last_update_success or elapsed >= 1:
             self._publish()
         elif self._cancel_publish is None:
             self._cancel_publish = async_call_later(self.hass, 1 - elapsed, self._publish)
@@ -122,7 +122,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
         self._published_at = monotonic()
         # Changed pushes postpone this watchdog. Unchanged fresh frames satisfy
         # it from the cache; a silent machine falls back to REST.
-        self.update_interval = timedelta(seconds=60 if self.path == "devices" else STALE_SECONDS)
+        self.update_interval = timedelta(seconds=60 if self.event_driven else STALE_SECONDS)
         if self.last_update_success and self._latest == self.data:
             return
         self.async_set_updated_data(self._latest)
@@ -201,6 +201,17 @@ class DecaidWaterCoordinator(DecaidStreamCoordinator):
         super().__init__(hass, client, "machine/waterLevels")
 
 
+class DecaidShotSettingsCoordinator(DecaidStreamCoordinator):
+    """Settings may remain unchanged, but require a fresh snapshot after reconnect."""
+
+    def __init__(self, hass, client):
+        super().__init__(hass, client, "machine/shotSettings")
+
+    @property
+    def expects_stream_data(self):
+        return self.device_connected and (not self.stream.active or self._latest is None)
+
+
 class DecaidShotCoordinator(DecaidStreamCoordinator):
     """Publish every sequencer event; distinguish the initial replay from live events."""
 
@@ -237,10 +248,11 @@ class DecaidData:
     water: DecaidWaterCoordinator
     scale: DecaidStreamCoordinator
     shot: DecaidShotCoordinator
+    shot_settings: DecaidShotSettingsCoordinator
 
     @property
     def streams(self):
-        return (self.machine, self.devices, self.water, self.scale, self.shot)
+        return (self.machine, self.devices, self.water, self.scale, self.shot, self.shot_settings)
 
     def machine_connected(self, machine_id: str | None) -> bool:
         return self.devices.last_update_success and any(

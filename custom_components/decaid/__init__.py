@@ -14,6 +14,7 @@ from .coordinator import (
     DecaidData,
     DecaidPushCoordinator,
     DecaidShotCoordinator,
+    DecaidShotSettingsCoordinator,
     DecaidStreamCoordinator,
     DecaidWaterCoordinator,
 )
@@ -35,6 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bo
         DecaidWaterCoordinator(hass, client),
         DecaidStreamCoordinator(hass, client, "scale/snapshot"),
         DecaidShotCoordinator(hass, client),
+        DecaidShotSettingsCoordinator(hass, client),
     )
     await data.machine.async_config_entry_first_refresh()
     # Optional resources can recover after setup instead of blocking all entities.
@@ -47,6 +49,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bo
             connected = data.machine_connected(entry.data.get(CONF_MACHINE_ID))
             data.machine.set_device_connected(connected)
             data.water.set_device_connected(connected)
+            data.shot_settings.set_device_connected(connected)
 
     entry.async_on_unload(data.devices.async_add_listener(devices_updated))
     devices_updated()

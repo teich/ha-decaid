@@ -14,6 +14,7 @@ Plain REST YAML works for readings and wake/sleep control, but it doesn't group 
 - Water level and refill threshold in millimeters over WebSocket. These are read-only sensors; the threshold is the value reported by the machine.
 - Scale weight (g), weight flow (g/s), battery (%), and timer (ms) over WebSocket. Battery and timer are unknown when the scale does not report them; an unset timer is also unknown.
 - Shot phase, last shot stop reason, and a scale-lost-during-shot indicator from Decaid's sequencer, plus a Shot event entity for automations.
+- Read-only shot settings: target steam temperature/duration, target hot-water temperature/volume/duration, target shot volume, and configured group temperature.
 
 After a successful wake/sleep command, the switch shows the requested state while the machine catches up, for up to 20 seconds. Fresh readings confirm it or restore the reported state.
 
@@ -24,6 +25,8 @@ Connections stay open with heartbeat checks and automatic reconnects. If streami
 Water levels have no REST GET fallback. The water sensors remain unavailable until their first frame and become unavailable if their stream fails, stops delivering data for 15 seconds, or the machine disconnects. Fresh frames restore them automatically.
 
 Scale readings also use streaming without REST fallback. They become unavailable on scale disconnect, stream failure, or 15 seconds without fresh measurements. A scale reconnect needs a fresh measurement before readings become available again. Numerical updates are limited to about once per second.
+
+Shot settings use `ws/v1/machine/shotSettings` without REST fallback. They update immediately on change and can remain quiet indefinitely after the initial snapshot while heartbeat checks succeed. Sensors become unavailable on stream or machine disconnect and require a fresh settings snapshot to recover. Temperatures are in °C, durations in seconds, and volumes in mL. Configured group temperature is the `groupTemp` setting, separate from the live grouphead/mix targets. Target shot volume is separate from the workflow's target yield in grams. The raw `steamSetting` field is retained in the payload but is not exposed as a sensor.
 
 ## Shot events
 

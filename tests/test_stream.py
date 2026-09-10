@@ -16,6 +16,7 @@ from custom_components.decaid.api import DecaidClient, DecaidError
 from custom_components.decaid.coordinator import (
     DecaidPushCoordinator,
     DecaidShotCoordinator,
+    DecaidShotSettingsCoordinator,
     DecaidStreamCoordinator,
     DecaidWaterCoordinator,
 )
@@ -396,17 +397,31 @@ async def test_rest_crossing_reconnect_requires_fresh_data(coordinator, rest_fai
         ("scale/snapshot", False, False, False),
         ("machine/shotState", True, False, True),
         ("machine/shotState", True, True, False),
+        ("machine/shotSettings", True, False, True),
+        ("machine/shotSettings", True, True, False),
+        ("machine/shotSettings", False, False, False),
         ("devices", True, False, True),
         ("devices", True, True, False),
     ],
 )
 async def test_control_frames_do_not_refresh_snapshots(
-    hass, frame_type, path, connected, initial_snapshot, should_fail, shot_payload
+    hass,
+    frame_type,
+    path,
+    connected,
+    initial_snapshot,
+    should_fail,
+    shot_payload,
+    shot_settings_payload,
 ):
     socket = Socket()
     client = MagicMock(connect_stream=AsyncMock(return_value=socket))
-    c = DecaidPushCoordinator(
-        hass, client, path, 10, "machine/snapshot" if path == "machine/state" else path
+    c = (
+        DecaidShotSettingsCoordinator(hass, client)
+        if path == "machine/shotSettings"
+        else DecaidPushCoordinator(
+            hass, client, path, 10, "machine/snapshot" if path == "machine/state" else path
+        )
     )
     c.set_device_connected(connected)
     now = 0
@@ -423,6 +438,8 @@ async def test_control_frames_do_not_refresh_snapshots(
                 return message({"weight": 0, "weightFlow": 0})
             if path == "machine/shotState":
                 return message(shot_payload)
+            if path == "machine/shotSettings":
+                return message(shot_settings_payload)
             return message({"devices": []} if path == "devices" else snapshot())
         if now >= 40:
             checked.set()
@@ -587,6 +604,67 @@ async def test_shot_socket_replay_and_quiet_watchdog(hass, shot_payload):
         assert await asyncio.wait_for(changes.get(), 3) == (True, True)
         assert c.data["stopReason"] == "disconnected"
         client.get.assert_not_awaited()
+    finally:
+        unsub()
+        await c.stop()
+        await c.async_shutdown()
+
+
+async def test_shot_settings_quiet_updates_and_machine_reconnect(hass, shot_settings_payload):
+    client = MagicMock(get=AsyncMock())
+    c = DecaidShotSettingsCoordinator(hass, client)
+    listener = MagicMock()
+    unsub = c.async_add_listener(listener)
+    try:
+        push(c, shot_settings_payload)
+        assert c.last_update_success
+        assert not c.expects_stream_data
+        listener.reset_mock()
+        push(c, dict(shot_settings_payload))
+        listener.assert_not_called()
+        c.stream.received_at -= 300
+        await c.async_refresh()
+        assert c.last_update_success
+        listener.assert_not_called()
+        # Settings changes are immediate, not delayed by numerical throttling.
+        push(c, {**shot_settings_payload, "targetSteamTemp": 155})
+        assert c.data["targetSteamTemp"] == 155
+        c.set_device_connected(False)
+        push(c, shot_settings_payload)
+        assert not c.last_update_success
+        assert not c.expects_stream_data
+        c.set_device_connected(True)
+        assert c.expects_stream_data
+        await c.async_refresh()
+        assert not c.last_update_success
+        push(c, shot_settings_payload)
+        assert c.last_update_success
+        assert not c.expects_stream_data
+        client.get.assert_not_awaited()
+    finally:
+        unsub()
+        await c.stop()
+        await c.async_shutdown()
+
+
+async def test_shot_settings_bad_frame_reconnects_without_rest(hass, shot_settings_payload):
+    client = MagicMock(get=AsyncMock())
+    c = DecaidShotSettingsCoordinator(hass, client)
+    socket = Socket()
+    client.connect_stream = AsyncMock(return_value=socket)
+    changes = asyncio.Queue()
+    unsub = c.async_add_listener(lambda: changes.put_nowait(c.last_update_success))
+    c.stream._task = asyncio.create_task(c.stream._run())
+    try:
+        await socket.queue.put(message(shot_settings_payload))
+        assert await asyncio.wait_for(changes.get(), 2)
+        await socket.queue.put(message({"targetSteamTemp": 160}))
+        assert not await asyncio.wait_for(changes.get(), 2)
+        socket.close.assert_awaited_once()
+        await socket.queue.put(message(shot_settings_payload))
+        assert await asyncio.wait_for(changes.get(), 3)
+        client.get.assert_not_awaited()
+        assert client.connect_stream.await_count == 2
     finally:
         unsub()
         await c.stop()

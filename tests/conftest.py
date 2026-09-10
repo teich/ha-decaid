@@ -6,6 +6,20 @@ import pytest
 
 
 @pytest.fixture
+def shot_settings_payload():
+    return {
+        "steamSetting": 0,
+        "targetSteamTemp": 160,
+        "targetSteamDuration": 120,
+        "targetHotWaterTemp": 88,
+        "targetHotWaterVolume": 50,
+        "targetHotWaterDuration": 30,
+        "targetShotVolume": 200,
+        "groupTemp": 93.0,
+    }
+
+
+@pytest.fixture
 def shot_payload():
     return {
         "event": "state",

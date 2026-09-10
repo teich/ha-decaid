@@ -16,6 +16,7 @@ from homeassistant.const import (
     UnitOfPressure,
     UnitOfTemperature,
     UnitOfTime,
+    UnitOfVolume,
 )
 
 from .entity import DecaidEntity
@@ -31,6 +32,52 @@ class DecaidSensorDescription(SensorEntityDescription):
 
 
 SENSORS = [
+    *[
+        DecaidSensorDescription(
+            key=key,
+            name=name,
+            source="shot_settings",
+            path=(field,),
+            numeric=True,
+            native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+            device_class=SensorDeviceClass.TEMPERATURE,
+        )
+        for key, name, field in (
+            ("target_steam_temperature", "Target steam temperature", "targetSteamTemp"),
+            ("target_hot_water_temperature", "Target hot water temperature", "targetHotWaterTemp"),
+            ("configured_group_temperature", "Configured group temperature", "groupTemp"),
+        )
+    ],
+    *[
+        DecaidSensorDescription(
+            key=key,
+            name=name,
+            source="shot_settings",
+            path=(field,),
+            numeric=True,
+            native_unit_of_measurement=UnitOfTime.SECONDS,
+            device_class=SensorDeviceClass.DURATION,
+        )
+        for key, name, field in (
+            ("target_steam_duration", "Target steam duration", "targetSteamDuration"),
+            ("target_hot_water_duration", "Target hot water duration", "targetHotWaterDuration"),
+        )
+    ],
+    *[
+        DecaidSensorDescription(
+            key=key,
+            name=name,
+            source="shot_settings",
+            path=(field,),
+            numeric=True,
+            native_unit_of_measurement=UnitOfVolume.MILLILITERS,
+            device_class=SensorDeviceClass.VOLUME,
+        )
+        for key, name, field in (
+            ("target_hot_water_volume", "Target hot water volume", "targetHotWaterVolume"),
+            ("target_shot_volume", "Target shot volume", "targetShotVolume"),
+        )
+    ],
     DecaidSensorDescription(
         key="scale_weight",
         name="Scale weight",

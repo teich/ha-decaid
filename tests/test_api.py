@@ -104,3 +104,16 @@ def test_unknown_shot_decision_reason_is_supported(shot_payload):
         "decision": {"kind": "stop", "reason": "newFirmwareReason"},
     }
     assert validate_payload("machine/shotState", payload) == payload
+
+
+@pytest.mark.parametrize("bad_value", [None, True, "160", float("nan"), float("inf"), 10**400])
+def test_invalid_shot_settings(shot_settings_payload, bad_value):
+    with pytest.raises(DecaidError, match="Invalid shot settings"):
+        validate_payload(
+            "machine/shotSettings", {**shot_settings_payload, "targetSteamTemp": bad_value}
+        )
+
+
+def test_incomplete_shot_settings():
+    with pytest.raises(DecaidError, match="Invalid shot settings"):
+        validate_payload("machine/shotSettings", {"targetSteamTemp": 160})

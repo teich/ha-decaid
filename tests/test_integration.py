@@ -57,7 +57,8 @@ async def setup_entry(hass, payloads):
 
 async def test_entities(hass, setup_entry):
     entry, _ = setup_entry
-    assert len(hass.states.async_all()) == 28
+    assert len(hass.states.async_all()) == 35
+    assert hass.states.get("sensor.decent_target_steam_temperature").state == "unavailable"
     assert hass.states.get("sensor.decent_water_level").state == "unavailable"
     assert hass.states.get("sensor.decent_refill_threshold").state == "unavailable"
     assert hass.states.get("sensor.decent_grouphead_temperature").state == "92.4"
@@ -359,7 +360,9 @@ async def test_adaptive_polling_backs_off_on_failure(hass, setup_entry, payloads
     assert coordinator.update_interval.total_seconds() == 2
 
 
-async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_start, shot_payload):
+async def test_streams_start_and_stop_with_entry(
+    hass, payloads, mock_stream_start, shot_payload, shot_settings_payload
+):
     import asyncio
     import json
 
@@ -374,6 +377,7 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
             "machine/waterLevels",
             "scale/snapshot",
             "machine/shotState",
+            "machine/shotSettings",
         )
     }
     sockets = {}
@@ -401,6 +405,9 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
         )
     )
     queues["machine/shotState"].put_nowait(WSMessage(WSMsgType.TEXT, json.dumps(shot_payload), ""))
+    queues["machine/shotSettings"].put_nowait(
+        WSMessage(WSMsgType.TEXT, json.dumps(shot_settings_payload), "")
+    )
     entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
     entry.add_to_hass(hass)
     with (
@@ -426,6 +433,18 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
             hass.states.get("sensor.decent_scale_timer").attributes["unit_of_measurement"] == "ms"
         )
         assert hass.states.get("sensor.decent_shot_phase").state == "idle"
+        for suffix, expected, unit in (
+            ("target_steam_temperature", "160.0", "°C"),
+            ("target_steam_duration", "120.0", "s"),
+            ("target_hot_water_temperature", "88.0", "°C"),
+            ("target_hot_water_volume", "50.0", "mL"),
+            ("target_hot_water_duration", "30.0", "s"),
+            ("target_shot_volume", "200.0", "mL"),
+            ("configured_group_temperature", "93.0", "°C"),
+        ):
+            state = hass.states.get(f"sensor.decent_{suffix}")
+            assert state.state == expected
+            assert state.attributes["unit_of_measurement"] == unit
         assert hass.states.get("event.decent_shot_event").state == "unknown"  # Initial replay.
         assert (
             hass.states.get("sensor.decent_water_level").attributes["unit_of_measurement"] == "mm"
@@ -547,3 +566,30 @@ async def test_water_entity_disconnect_recovery_and_unchanged_threshold(
     push(30)
     assert hass.states.get("sensor.decent_water_level").state == "30.0"
     assert hass.states.get("sensor.decent_refill_threshold").state == "5.0"
+
+
+async def test_shot_settings_follow_machine_availability(
+    hass, setup_entry, payloads, shot_settings_payload
+):
+    from time import monotonic
+
+    entry, _ = setup_entry
+    settings = entry.runtime_data.shot_settings
+
+    def push():
+        settings.stream.active = True
+        settings.stream.received_at = monotonic()
+        settings.async_receive(shot_settings_payload)
+
+    push()
+    entity_id = "sensor.decent_target_steam_temperature"
+    assert hass.states.get(entity_id).state == "160.0"
+    payloads["devices"] = []
+    await entry.runtime_data.devices.async_refresh()
+    push()
+    assert hass.states.get(entity_id).state == "unavailable"
+    payloads["devices"] = [{"type": "machine", "state": "connected"}]
+    await entry.runtime_data.devices.async_refresh()
+    assert hass.states.get(entity_id).state == "unavailable"
+    push()
+    assert hass.states.get(entity_id).state == "160.0"
