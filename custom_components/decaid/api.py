@@ -1,6 +1,7 @@
 """Asynchronous client for Decaid's local REST and WebSocket APIs."""
 
 import asyncio
+import math
 from typing import Any
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, ClientWSTimeout
@@ -24,6 +25,13 @@ def validate_payload(path: str, data: Any) -> dict | list:
         or not data["state"]["state"]
     ):
         raise DecaidError("Invalid machine state")
+    if path == "machine/waterLevels" and any(
+        isinstance(data.get(key), bool)
+        or not isinstance(data.get(key), (int, float))
+        or not math.isfinite(data[key])
+        for key in ("currentLevel", "refillLevel")
+    ):
+        raise DecaidError("Invalid water levels")
     return data
 
 

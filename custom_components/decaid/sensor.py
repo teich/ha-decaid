@@ -9,7 +9,13 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfMass, UnitOfPressure, UnitOfTemperature
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfLength,
+    UnitOfMass,
+    UnitOfPressure,
+    UnitOfTemperature,
+)
 
 from .entity import DecaidEntity
 
@@ -28,6 +34,28 @@ SENSORS = [
         key="state", name="State", path=("state", "state"), icon="mdi:coffee-maker"
     ),
     DecaidSensorDescription(key="substate", name="Substate", path=("state", "substate")),
+    DecaidSensorDescription(
+        key="water_level",
+        name="Water level",
+        source="water",
+        path=("currentLevel",),
+        numeric=True,
+        native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:cup-water",
+    ),
+    DecaidSensorDescription(
+        key="refill_threshold",
+        name="Refill threshold",
+        source="water",
+        path=("refillLevel",),
+        numeric=True,
+        native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+        device_class=SensorDeviceClass.DISTANCE,
+        icon="mdi:water-alert",
+    ),
     *[
         DecaidSensorDescription(
             key=key,

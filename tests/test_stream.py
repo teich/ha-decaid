@@ -13,7 +13,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.decaid.api import DecaidClient, DecaidError
-from custom_components.decaid.coordinator import DecaidPushCoordinator
+from custom_components.decaid.coordinator import DecaidPushCoordinator, DecaidWaterCoordinator
 
 
 def snapshot(state="idle", temp=90, substate="idle"):
@@ -385,6 +385,8 @@ async def test_rest_crossing_reconnect_requires_fresh_data(coordinator, rest_fai
     [
         ("machine/state", True, True, True),
         ("machine/state", False, False, False),
+        ("machine/waterLevels", True, True, True),
+        ("machine/waterLevels", False, False, False),
         ("devices", True, False, True),
         ("devices", True, True, False),
     ],
@@ -395,7 +397,7 @@ async def test_control_frames_do_not_refresh_snapshots(
     socket = Socket()
     client = MagicMock(connect_stream=AsyncMock(return_value=socket))
     c = DecaidPushCoordinator(
-        hass, client, path, 10, "devices" if path == "devices" else "machine/snapshot"
+        hass, client, path, 10, "machine/snapshot" if path == "machine/state" else path
     )
     c.set_machine_connected(connected)
     now = 0
@@ -406,6 +408,8 @@ async def test_control_frames_do_not_refresh_snapshots(
         nonlocal now, sent_initial
         if initial_snapshot and not sent_initial:
             sent_initial = True
+            if path == "machine/waterLevels":
+                return message({"currentLevel": 28.3, "refillLevel": 5})
             return message({"devices": []} if path == "devices" else snapshot())
         if now >= 40:
             checked.set()
@@ -467,3 +471,40 @@ async def test_unchanged_pushes_keep_watchdog_fresh_without_notifications(
         assert coordinator.client.get.await_count == 2
     finally:
         unsub()
+
+
+@pytest.mark.parametrize("failure", ["closed", "stale", "invalid"])
+async def test_water_stream_failure_and_recovery_without_rest(hass, failure):
+    client = MagicMock(get=AsyncMock())
+    c = DecaidWaterCoordinator(hass, client)
+    socket = Socket()
+    client.connect_stream = AsyncMock(return_value=socket)
+    changes = asyncio.Queue()
+    unsub = c.async_add_listener(lambda: changes.put_nowait(c.last_update_success))
+    c.stream._task = asyncio.create_task(c.stream._run())
+    try:
+        assert not c.last_update_success
+        await socket.queue.put(message({"currentLevel": 28.3, "refillLevel": 5}))
+        assert await asyncio.wait_for(changes.get(), 2)
+        assert c.data == {"currentLevel": 28.3, "refillLevel": 5}
+        if failure == "stale":
+            c.stream.received_at -= 16
+            await c.async_refresh()
+        else:
+            await socket.queue.put(
+                message({"currentLevel": None, "refillLevel": 5})
+                if failure == "invalid"
+                else WSMessage(WSMsgType.CLOSED, None, None)
+            )
+        assert not await asyncio.wait_for(changes.get(), 2)
+        # Force immediate reconnect for the stale case as well.
+        if failure == "stale":
+            await socket.queue.put(WSMessage(WSMsgType.CLOSED, None, None))
+        await socket.queue.put(message({"currentLevel": 29, "refillLevel": 5}))
+        assert await asyncio.wait_for(changes.get(), 3)
+        assert c.data == {"currentLevel": 29, "refillLevel": 5}
+        client.get.assert_not_awaited()
+    finally:
+        unsub()
+        await c.stop()
+        await c.async_shutdown()

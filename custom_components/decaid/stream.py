@@ -57,7 +57,7 @@ class DecaidStream:
                     # freshness. Check this even when receive() never times out.
                     expects_data = (
                         self.coordinator.machine_connected
-                        if self.path == "machine/snapshot"
+                        if self.path in ("machine/snapshot", "machine/waterLevels")
                         else not self.active
                     )
                     if expects_data and now - self.received_at >= STALE_SECONDS:

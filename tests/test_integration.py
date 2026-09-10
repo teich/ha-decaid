@@ -57,7 +57,9 @@ async def setup_entry(hass, payloads):
 
 async def test_entities(hass, setup_entry):
     entry, _ = setup_entry
-    assert len(hass.states.async_all()) == 18
+    assert len(hass.states.async_all()) == 20
+    assert hass.states.get("sensor.decent_water_level").state == "unavailable"
+    assert hass.states.get("sensor.decent_refill_threshold").state == "unavailable"
     assert hass.states.get("sensor.decent_grouphead_temperature").state == "92.4"
     assert hass.states.get("sensor.decent_target_dose").state == "18.0"
     assert hass.states.get("binary_sensor.decent_machine_connected").state == "on"
@@ -364,7 +366,9 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
     from aiohttp import WSMessage, WSMsgType
 
     mock_stream_start.side_effect = mock_stream_start.real_start
-    queues = {"machine/snapshot": asyncio.Queue(), "devices": asyncio.Queue()}
+    queues = {
+        path: asyncio.Queue() for path in ("machine/snapshot", "devices", "machine/waterLevels")
+    }
     sockets = {}
     for path, queue in queues.items():
         socket = AsyncMock()
@@ -375,6 +379,9 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
     )
     queues["devices"].put_nowait(
         WSMessage(WSMsgType.TEXT, json.dumps({"devices": payloads["devices"]}), "")
+    )
+    queues["machine/waterLevels"].put_nowait(
+        WSMessage(WSMsgType.TEXT, json.dumps({"currentLevel": 28.3, "refillLevel": 5}), "")
     )
     entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
     entry.add_to_hass(hass)
@@ -391,10 +398,56 @@ async def test_streams_start_and_stop_with_entry(hass, payloads, mock_stream_sta
         await hass.async_block_till_done()
         assert hass.states.get("sensor.decent_state").state == "heating"
         assert hass.states.get("switch.decent_power").state == "on"
-        tasks = [entry.runtime_data.machine.stream._task, entry.runtime_data.devices.stream._task]
+        assert hass.states.get("sensor.decent_water_level").state == "28.3"
+        assert hass.states.get("sensor.decent_refill_threshold").state == "5.0"
+        assert (
+            hass.states.get("sensor.decent_water_level").attributes["unit_of_measurement"] == "mm"
+        )
+        tasks = [
+            c.stream._task
+            for c in (
+                entry.runtime_data.machine,
+                entry.runtime_data.devices,
+                entry.runtime_data.water,
+            )
+        ]
         assert all(task is not None and not task.done() for task in tasks)
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
         assert all(task.done() for task in tasks)
         for socket in sockets.values():
             socket.close.assert_awaited_once()
+
+
+async def test_water_entity_disconnect_recovery_and_unchanged_threshold(
+    hass, setup_entry, payloads, freezer
+):
+    from datetime import timedelta
+    from time import monotonic
+
+    entry, _ = setup_entry
+    water = entry.runtime_data.water
+
+    def push(level):
+        water.stream.active = True
+        water.stream.received_at = monotonic()
+        water.async_receive({"currentLevel": level, "refillLevel": 5})
+
+    push(28.3)
+    threshold = hass.states.get("sensor.decent_refill_threshold")
+    freezer.tick(timedelta(seconds=1))
+    push(28.4)
+    assert hass.states.get("sensor.decent_water_level").state == "28.4"
+    assert (
+        hass.states.get("sensor.decent_refill_threshold").last_reported == threshold.last_reported
+    )
+    payloads["devices"] = []
+    await entry.runtime_data.devices.async_refresh()
+    push(29)
+    assert hass.states.get("sensor.decent_water_level").state == "unavailable"
+    payloads["devices"] = [{"type": "machine", "state": "connected"}]
+    await entry.runtime_data.devices.async_refresh()
+    assert hass.states.get("sensor.decent_water_level").state == "unavailable"
+    push(30)
+    assert hass.states.get("sensor.decent_water_level").state == "30.0"
+    assert hass.states.get("sensor.decent_refill_threshold").state == "5.0"

@@ -5,7 +5,24 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import ClientConnectionError
 
-from custom_components.decaid.api import DecaidClient, DecaidError
+from custom_components.decaid.api import DecaidClient, DecaidError, validate_payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"currentLevel": 28},
+        {"currentLevel": True, "refillLevel": 5},
+        {"currentLevel": "28", "refillLevel": 5},
+        {"currentLevel": None, "refillLevel": 5},
+        {"currentLevel": float("nan"), "refillLevel": 5},
+        {"currentLevel": 28, "refillLevel": float("inf")},
+    ],
+)
+def test_invalid_water_levels(payload):
+    with pytest.raises(DecaidError, match="Invalid water levels"):
+        validate_payload("machine/waterLevels", payload)
 
 
 @pytest.mark.parametrize("payload", [[], None, "text", {"state": None}])

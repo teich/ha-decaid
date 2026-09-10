@@ -114,9 +114,7 @@ class DecaidPushCoordinator(DecaidCoordinator):
         self._published_at = monotonic()
         # Changed pushes postpone this watchdog. Unchanged fresh frames satisfy
         # it from the cache; a silent machine falls back to REST.
-        self.update_interval = timedelta(
-            seconds=STALE_SECONDS if self.path == "machine/state" else 60
-        )
+        self.update_interval = timedelta(seconds=60 if self.path == "devices" else STALE_SECONDS)
         if self.last_update_success and self._latest == self.data:
             return
         self.async_set_updated_data(self._latest)
@@ -164,6 +162,30 @@ class DecaidPushCoordinator(DecaidCoordinator):
         return data
 
 
+class DecaidWaterCoordinator(DecaidPushCoordinator):
+    """Water levels have a stream but no REST GET endpoint."""
+
+    def __init__(self, hass, client):
+        super().__init__(hass, client, "machine/waterLevels", STALE_SECONDS, "machine/waterLevels")
+        self.last_update_success = False
+
+    @callback
+    def async_stream_lost(self):
+        super().async_stream_lost()
+        if not self._stopped:
+            self.async_set_update_error(UpdateFailed("Water level stream unavailable"))
+
+    async def _async_update_data(self):
+        if (
+            not self.machine_connected
+            or not self.stream.active
+            or self._latest is None
+            or monotonic() - self.stream.received_at >= STALE_SECONDS
+        ):
+            raise UpdateFailed("Waiting for fresh water levels")
+        return self._latest
+
+
 @dataclass
 class DecaidData:
     """Runtime data owned by a config entry."""
@@ -173,6 +195,7 @@ class DecaidData:
     workflow: DecaidCoordinator
     settings: DecaidCoordinator
     devices: DecaidPushCoordinator
+    water: DecaidWaterCoordinator
 
     def machine_connected(self, machine_id: str | None) -> bool:
         return self.devices.last_update_success and any(

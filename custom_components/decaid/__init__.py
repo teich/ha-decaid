@@ -9,7 +9,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import DecaidClient
 from .const import CONF_MACHINE_ID, PLATFORMS
-from .coordinator import DecaidCoordinator, DecaidData, DecaidPushCoordinator
+from .coordinator import (
+    DecaidCoordinator,
+    DecaidData,
+    DecaidPushCoordinator,
+    DecaidWaterCoordinator,
+)
 
 type DecaidConfigEntry = ConfigEntry[DecaidData]
 
@@ -25,6 +30,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bo
         DecaidCoordinator(hass, client, "workflow", 60),
         DecaidCoordinator(hass, client, "settings", 60),
         DecaidPushCoordinator(hass, client, "devices", 60, "devices"),
+        DecaidWaterCoordinator(hass, client),
     )
     await data.machine.async_config_entry_first_refresh()
     # Optional resources can recover after setup instead of blocking all entities.
@@ -34,15 +40,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> bo
     @callback
     def devices_updated():
         if data.devices.last_update_success:
-            data.machine.set_machine_connected(
-                data.machine_connected(entry.data.get(CONF_MACHINE_ID))
-            )
+            connected = data.machine_connected(entry.data.get(CONF_MACHINE_ID))
+            data.machine.set_machine_connected(connected)
+            data.water.set_machine_connected(connected)
 
     entry.async_on_unload(data.devices.async_add_listener(devices_updated))
     devices_updated()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     data.machine.start(entry)
     data.devices.start(entry)
+    data.water.start(entry)
     return True
 
 
@@ -50,5 +57,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: DecaidConfigEntry) -> b
     """Unload platforms and their coordinator listeners."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    await asyncio.gather(entry.runtime_data.machine.stop(), entry.runtime_data.devices.stop())
+    await asyncio.gather(
+        entry.runtime_data.machine.stop(),
+        entry.runtime_data.devices.stop(),
+        entry.runtime_data.water.stop(),
+    )
     return True

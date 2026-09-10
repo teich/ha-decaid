@@ -11,12 +11,15 @@ Plain REST YAML works for readings and wake/sleep control, but it doesn't group 
 - Wake/sleep switch that only sends a wake command when the machine is sleeping.
 - Live state, substate, temperatures, pressure, flow, and their targets over WebSocket. State changes appear immediately; numerical updates are limited to about once per second.
 - Live machine/scale connectivity. Profile, dose/yield targets, and tablet battery refresh over REST every 60 seconds.
+- Water level and refill threshold in millimeters over WebSocket. These are read-only sensors; the threshold is the value reported by the machine.
 
 After a successful wake/sleep command, the switch shows the requested state while the machine catches up, for up to 20 seconds. Fresh readings confirm it or restore the reported state.
 
 Commands still use REST. The sleep command can interrupt a running operation.
 
 Connections stay open with heartbeat checks and automatic reconnects. If streaming fails, machine readings fall back to REST every 1–2 seconds while awake or 10 seconds while sleeping/unreachable; device connectivity falls back to 60-second polling. A disconnected machine’s readings are unavailable until fresh data arrives.
+
+Water levels have no REST GET fallback. The water sensors remain unavailable until their first frame and become unavailable if their stream fails, stops delivering data for 15 seconds, or the machine disconnects. Fresh frames restore them automatically.
 
 Upgrading from 0.1? Update in HACS and restart Home Assistant. Existing entities and automations keep their IDs; no reconfiguration is needed.
 
