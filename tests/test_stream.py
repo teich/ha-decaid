@@ -391,7 +391,8 @@ async def test_rest_crossing_reconnect_requires_fresh_data(coordinator, rest_fai
     [
         ("machine/state", True, True, True),
         ("machine/state", False, False, False),
-        ("machine/waterLevels", True, True, True),
+        ("machine/waterLevels", True, True, False),
+        ("machine/waterLevels", True, False, True),
         ("machine/waterLevels", False, False, False),
         ("scale/snapshot", True, True, True),
         ("scale/snapshot", False, False, False),
@@ -417,7 +418,9 @@ async def test_control_frames_do_not_refresh_snapshots(
     socket = Socket()
     client = MagicMock(connect_stream=AsyncMock(return_value=socket))
     c = (
-        DecaidShotSettingsCoordinator(hass, client)
+        DecaidWaterCoordinator(hass, client)
+        if path == "machine/waterLevels"
+        else DecaidShotSettingsCoordinator(hass, client)
         if path == "machine/shotSettings"
         else DecaidPushCoordinator(
             hass, client, path, 10, "machine/snapshot" if path == "machine/state" else path
@@ -503,7 +506,7 @@ async def test_unchanged_pushes_keep_watchdog_fresh_without_notifications(
         unsub()
 
 
-@pytest.mark.parametrize("failure", ["closed", "stale", "invalid"])
+@pytest.mark.parametrize("failure", ["closed", "invalid"])
 async def test_water_stream_failure_and_recovery_without_rest(hass, failure):
     client = MagicMock(get=AsyncMock())
     c = DecaidWaterCoordinator(hass, client)
@@ -517,19 +520,16 @@ async def test_water_stream_failure_and_recovery_without_rest(hass, failure):
         await socket.queue.put(message({"currentLevel": 28.3, "refillLevel": 5}))
         assert await asyncio.wait_for(changes.get(), 2)
         assert c.data == {"currentLevel": 28.3, "refillLevel": 5}
-        if failure == "stale":
-            c.stream.received_at -= 16
-            await c.async_refresh()
-        else:
-            await socket.queue.put(
-                message({"currentLevel": None, "refillLevel": 5})
-                if failure == "invalid"
-                else WSMessage(WSMsgType.CLOSED, None, None)
-            )
+        c.stream.received_at -= 300
+        await c.async_refresh()
+        assert c.last_update_success
+        assert changes.empty()
+        await socket.queue.put(
+            message({"currentLevel": None, "refillLevel": 5})
+            if failure == "invalid"
+            else WSMessage(WSMsgType.CLOSED, None, None)
+        )
         assert not await asyncio.wait_for(changes.get(), 2)
-        # Force immediate reconnect for the stale case as well.
-        if failure == "stale":
-            await socket.queue.put(WSMessage(WSMsgType.CLOSED, None, None))
         await socket.queue.put(message({"currentLevel": 29, "refillLevel": 5}))
         assert await asyncio.wait_for(changes.get(), 3)
         assert c.data == {"currentLevel": 29, "refillLevel": 5}

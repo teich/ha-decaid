@@ -66,7 +66,12 @@ class DecaidPushCoordinator(DecaidCoordinator):
 
     @property
     def event_driven(self):
-        return self.path in ("devices", "machine/shotState", "machine/shotSettings")
+        return self.path in (
+            "devices",
+            "machine/shotState",
+            "machine/shotSettings",
+            "machine/waterLevels",
+        )
 
     @property
     def expects_stream_data(self):
@@ -199,6 +204,10 @@ class DecaidWaterCoordinator(DecaidStreamCoordinator):
 
     def __init__(self, hass, client):
         super().__init__(hass, client, "machine/waterLevels")
+
+    @property
+    def expects_stream_data(self):
+        return self.device_connected and (not self.stream.active or self._latest is None)
 
 
 class DecaidShotSettingsCoordinator(DecaidStreamCoordinator):
