@@ -40,7 +40,7 @@ Shot settings use `ws/v1/machine/shotSettings` without REST fallback. They updat
 
 ## Shot events
 
-The **Shot event** entity emits `state`, `decision`, and `terminal` events individually, without throttling. Its attributes include `shot_id`, `phase`, `source_timestamp`, `scale_lost`, and `decision` (kind, reason, and any additional context supplied by Decaid). The first frame after connecting restores the current shot sensors but does not fire an event, since Decaid replays its latest frame. Events missed while disconnected cannot be recovered from this feed.
+The **Shot event** entity emits `state`, `decision`, and `terminal` events individually, without throttling. Its attributes include `shot_id`, `phase`, `source_timestamp`, `scale_lost`, `decision` (kind, reason, and any additional context supplied by Decaid). The first frame after connecting restores the current shot sensors but does not fire an event, since Decaid replays its latest frame. Events missed while disconnected cannot be recovered from this feed.
 
 **Last shot stop reason** retains the latest stop, abort, or terminal reason received during this integration session; a later finalize event does not overwrite it. **Scale lost during shot** follows Decaid's flag, which remains set for the rest of a shot even if the scale reconnects.
 
@@ -56,7 +56,7 @@ The API snapshot has no explicit brew-ready flag. `idle` alone does not establis
 
 ## Install
 
-Requires Home Assistant 2025.2+ and Decaid running with its local API reachable from Home Assistant (port `8080` by default). The minimum Home Assistant version has not yet been verified in the current CI; use a current supported release where possible. Decaid's API varies by version: if optional streams are missing, their entities will remain unavailable. Use a current Decaid release for the full feature set.
+Requires Home Assistant 2026.10+ and Decaid running with its local API reachable from Home Assistant (port `8080` by default). Decaid's API varies by version: if optional streams are missing, their entities will remain unavailable. Use a current Decaid release for the full feature set.
 
 [Open this repository in HACS or Marketplace](https://my.home-assistant.io/redirect/hacs_repository/?owner=teich&repository=ha-decaid&category=integration)
 
