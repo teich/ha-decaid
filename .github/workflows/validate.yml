@@ -15,8 +15,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # No license selected yet; required for default catalog submission.
-          ignore: license
   hassfest:
     runs-on: ubuntu-latest
     steps:
