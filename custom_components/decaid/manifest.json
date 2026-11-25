@@ -1,6 +1,9 @@
 {
   "domain": "decaid",
   "name": "Decaid",
+  "categories": [
+    "appliances_cleaning.cooking"
+  ],
   "codeowners": [
     "@teich"
   ],
@@ -10,5 +13,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/teich/ha-decaid/issues",
   "requirements": [],
-  "version": "0.3.1"
+  "version": "0.4.0"
 }

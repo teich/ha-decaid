@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Decaid app issues
+    url: https://github.com/decentespresso/decaid/issues
+    about: Problems with the Decaid app itself rather than this integration.

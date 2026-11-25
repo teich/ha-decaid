@@ -1,0 +1,16 @@
+name: Feature request
+description: Suggest something the integration could expose or do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What would you like?
+      description: The entity or behavior you want, and what you would use it for.
+    validations:
+      required: true
+  - type: input
+    id: api
+    attributes:
+      label: Decaid API endpoint
+      description: The REST or WebSocket endpoint that provides it, if you know it.

@@ -14,6 +14,7 @@ STALE_SECONDS = 15
 RECEIVE_CHECK_SECONDS = 5
 PING_INTERVAL = 20
 PONG_TIMEOUT = 10
+FAILURES_BEFORE_WARNING = 5
 
 
 class DecaidStream:
@@ -26,6 +27,26 @@ class DecaidStream:
         self.received_at = 0.0
         self._stopped = False
         self._task = None
+        self._failures = 0
+
+    def _record_failure(self, err):
+        """Log at debug, escalating once when the stream keeps failing."""
+        self._failures += 1
+        if self._failures == FAILURES_BEFORE_WARNING:
+            _LOGGER.warning(
+                "Decaid %s stream has failed %d times in a row (latest: %s); "
+                "retrying in the background",
+                self.path,
+                self._failures,
+                err,
+            )
+        else:
+            _LOGGER.debug("Decaid %s stream interrupted: %s", self.path, err)
+
+    def _record_data(self):
+        if self._failures >= FAILURES_BEFORE_WARNING:
+            _LOGGER.info("Decaid %s stream recovered", self.path)
+        self._failures = 0
 
     def start(self, entry):
         self._task = entry.async_create_background_task(
@@ -99,14 +120,23 @@ class DecaidStream:
                     initial = not self.active
                     self.received_at = monotonic()
                     self.active = True
+                    self._record_data()
                     self.coordinator.async_receive(data, initial=initial)
             except (ClientError, OSError, TimeoutError, ValueError, DecaidError) as err:
-                _LOGGER.debug("Decaid %s stream interrupted: %s", self.path, err)
+                self._record_failure(err)
+            except Exception as err:
+                # Anything unexpected must not end the task: that would stop
+                # this stream for good until the integration is reloaded.
+                _LOGGER.exception("Unexpected error in Decaid %s stream", self.path)
+                self._record_failure(err)
             finally:
                 self.active = False
                 self.coordinator.async_stream_lost()
                 if socket is not None:
-                    await socket.close()
+                    try:
+                        await socket.close()
+                    except Exception as err:
+                        _LOGGER.debug("Error closing Decaid %s stream: %s", self.path, err)
             if not self._stopped:
                 await self.coordinator.async_stream_failed()
                 # A socket that repeatedly opens then immediately fails must

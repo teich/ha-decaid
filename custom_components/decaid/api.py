@@ -23,9 +23,14 @@ def _is_number(value):
 
 def validate_payload(path: str, data: Any) -> dict | list:
     """Share validation between REST snapshots and streamed payloads."""
-    expected = list if path == "devices" else dict
+    route = path.partition("?")[0]
+    expected = list if route == "devices" else dict
     if not isinstance(data, expected):
         raise DecaidError(f"Invalid response from {path}")
+    if route == "shots" and (
+        not isinstance(data.get("total"), int) or isinstance(data["total"], bool)
+    ):
+        raise DecaidError("Invalid shot list")
     if path == "devices" and any(not isinstance(item, dict) for item in data):
         raise DecaidError("Invalid device list")
     if path == "machine/state" and (
@@ -84,6 +89,22 @@ def validate_payload(path: str, data: Any) -> dict | list:
     return data
 
 
+def known_value(value) -> str | None:
+    """Decaid reports placeholders before the machine's handshake completes."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = str(value)
+    return value if isinstance(value, str) and value not in ("", "0", "Unknown") else None
+
+
+def machine_serial(info: Any) -> str | None:
+    """The connected machine's serial number, once Decaid has read it.
+
+    Older DE1s report 0 until Decaid resolves their serial from the owner's
+    Decent account, so it can be missing even while the machine is connected.
+    """
+    return known_value(info.get("serialNumber")) if isinstance(info, dict) else None
+
+
 class DecaidClient:
     """Use Home Assistant's shared HTTP session."""
 
@@ -91,12 +112,18 @@ class DecaidClient:
         self.session = session
         self.base_url = URL.build(scheme="http", host=host, port=port)
 
-    async def request(self, method: str, path: str) -> Any:
+    async def request(self, method: str, path: str, body: Any = None) -> Any:
         """Read JSON, or accept an empty successful command response."""
+        # A "?query" is split off: yarl would percent-encode it inside a path segment.
+        route, _, query = path.partition("?")
+        url = self.base_url / "api" / "v1" / route
+        if query:
+            url = url.with_query(query)
         try:
             async with self.session.request(
                 method,
-                self.base_url / "api" / "v1" / path,
+                url,
+                json=body,
                 timeout=ClientTimeout(total=5 if method == "GET" else 10),
                 allow_redirects=False,
             ) as response:
@@ -123,6 +150,10 @@ class DecaidClient:
                 timeout=ClientWSTimeout(ws_close=5),
                 max_msg_size=1024 * 1024,
             )
+
+    async def command(self, method: str, path: str, body: Any = None) -> None:
+        """Send a settings or accessory command; never one that starts brewing."""
+        await self.request(method, path, body)
 
     async def set_power(self, awake: bool) -> None:
         """Request wake or sleep; never start brewing."""

@@ -4,10 +4,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.decaid.api import DecaidError
+from custom_components.decaid.switch import BUSY_STATES
 
 
 @pytest.fixture
@@ -27,6 +29,58 @@ def payloads():
             {"type": "machine", "id": "abc", "state": "connected"},
             {"type": "scale", "state": "connected"},
         ],
+        "shots?limit=1": {"items": [], "total": 1265, "limit": 1, "offset": 0},
+        "machine/info": {
+            "version": "1352",
+            "model": "DE1Pro",
+            "serialNumber": "12345",
+            "GHC": True,
+            "extra": {"refillKit": False, "voltage": 230},
+        },
+        "machine/capabilities": {"capabilities": []},
+        "machine/settings": {
+            "fan": 50,
+            "usb": False,
+            "flushTemp": 89.3,
+            "flushTimeout": 4.7,
+            "flushFlow": 7.1,
+            "hotWaterFlow": 6.2,
+            "steamFlow": 0.81,
+            "tankTemp": 31,
+            "steamPurgeMode": 0,
+        },
+        "display": {
+            "wakeLockEnabled": True,
+            "wakeLockOverride": False,
+            "brightness": 70,
+            "requestedBrightness": 70,
+            "lowBatteryBrightnessActive": False,
+            "platformSupported": {"brightness": True, "wakeLock": True},
+        },
+        "presence/settings": {
+            "userPresenceEnabled": True,
+            "sleepTimeoutMinutes": 30,
+            "keepAwakeUntil": None,
+            "schedules": [],
+        },
+        "update": {
+            "phase": "idle",
+            "currentVersion": "1.4.0",
+            "latestVersion": None,
+            "releaseNotes": None,
+            "releaseUrl": None,
+            "installable": False,
+            "progress": None,
+            "error": None,
+        },
+        "machine/waterLevels": {"currentLevel": 28.3, "refillLevel": 5},
+        "machine/firmware": {
+            "artifacts": [{"id": "de1-1358", "build": 1358, "versionLabel": "1358"}],
+            "machine": {"model": "DE1Pro", "build": 1352},
+            "recommendedArtifactId": "de1-1358",
+            "updateAvailable": True,
+            "operation": {"state": "idle"},
+        },
     }
 
 
@@ -57,10 +111,11 @@ async def setup_entry(hass, payloads):
 
 async def test_entities(hass, setup_entry):
     entry, _ = setup_entry
-    assert len(hass.states.async_all()) == 35
-    assert hass.states.get("sensor.decent_target_steam_temperature").state == "unavailable"
-    assert hass.states.get("sensor.decent_water_level").state == "unavailable"
-    assert hass.states.get("sensor.decent_refill_threshold").state == "unavailable"
+    assert len(hass.states.async_all()) == 57
+    assert hass.states.get("number.decent_target_steam_temperature").state == "unavailable"
+    # Water levels load over REST before their stream connects.
+    assert hass.states.get("sensor.decent_water_level").state == "28.3"
+    assert hass.states.get("number.decent_refill_threshold").state == "5"
     assert hass.states.get("sensor.decent_grouphead_temperature").state == "92.4"
     assert hass.states.get("sensor.decent_target_dose").state == "18.0"
     assert hass.states.get("binary_sensor.decent_machine_connected").state == "on"
@@ -118,6 +173,11 @@ async def test_power_guard_and_errors(hass, setup_entry, payloads):
     payloads["machine/state"] = {"state": {"state": "espresso"}}
     await call("turn_on")
     power.assert_not_awaited()
+    # Sleeping a busy machine would abort the shot.
+    with pytest.raises(HomeAssistantError, match="busy"):
+        await call("turn_off")
+    power.assert_not_awaited()
+    payloads["machine/state"] = {"state": {"state": "idle"}}
     await call("turn_off")
     power.assert_awaited_once_with(False)
     power.side_effect = DecaidError("HTTP 503")
@@ -144,7 +204,9 @@ async def test_independent_failures_and_recovery(hass, setup_entry, payloads):
     assert hass.states.get("sensor.decent_tablet_battery").state == "75.0"
     payloads["devices"] = DecaidError("offline")
     await entry.runtime_data.devices.async_refresh()
-    assert hass.states.get("switch.decent_power").state == "unavailable"
+    assert hass.states.get("binary_sensor.decent_machine_connected").state == "unavailable"
+    # A valid machine state read still proves the machine is there.
+    assert hass.states.get("switch.decent_power").state == "off"
 
 
 async def test_flow(hass):
@@ -179,6 +241,7 @@ async def test_flow(hass):
 async def test_reconfigure(hass, setup_entry):
     entry, _ = setup_entry
     original_id = hass.states.get("switch.decent_power").entity_id
+    hass.config_entries.async_update_entry(entry, title="Decent (192.168.2.231)")
     result = await hass.config_entries.flow.async_init(
         "decaid", context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id}
     )
@@ -188,7 +251,22 @@ async def test_reconfigure(hass, setup_entry):
     assert result["reason"] == "reconfigure_successful"
     await hass.async_block_till_done()
     assert entry.data["host"] == "192.168.2.232"
+    assert entry.title == "Decent (192.168.2.232)"
     assert hass.states.get(original_id) is not None
+
+
+async def test_reconfigure_keeps_custom_title(hass, setup_entry):
+    entry, _ = setup_entry
+    hass.config_entries.async_update_entry(entry, title="Kitchen espresso")
+    result = await hass.config_entries.flow.async_init(
+        "decaid", context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"host": "192.168.2.233", "port": 8080}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    await hass.async_block_till_done()
+    assert entry.title == "Kitchen espresso"
 
 
 async def test_machine_id_filter(hass, setup_entry, payloads):
@@ -222,7 +300,7 @@ async def test_setup_retry_and_optional_failure(hass):
         await hass.async_block_till_done()
         assert hass.states.get("sensor.decent_state").state == "sleeping"
         assert hass.states.get("sensor.decent_profile").state == "unavailable"
-        assert hass.states.get("switch.decent_power").state == "unavailable"
+        assert hass.states.get("switch.decent_power").state == "off"
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
 
@@ -378,6 +456,7 @@ async def test_streams_start_and_stop_with_entry(
             "scale/snapshot",
             "machine/shotState",
             "machine/shotSettings",
+            "update",
         )
     }
     sockets = {}
@@ -408,6 +487,20 @@ async def test_streams_start_and_stop_with_entry(
     queues["machine/shotSettings"].put_nowait(
         WSMessage(WSMsgType.TEXT, json.dumps(shot_settings_payload), "")
     )
+    queues["update"].put_nowait(
+        WSMessage(
+            WSMsgType.TEXT,
+            json.dumps(
+                {
+                    **payloads["update"],
+                    "phase": "downloading",
+                    "latestVersion": "1.5.0",
+                    "progress": 0.25,
+                }
+            ),
+            "",
+        )
+    )
     entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
     entry.add_to_hass(hass)
     with (
@@ -424,7 +517,7 @@ async def test_streams_start_and_stop_with_entry(
         assert hass.states.get("sensor.decent_state").state == "heating"
         assert hass.states.get("switch.decent_power").state == "on"
         assert hass.states.get("sensor.decent_water_level").state == "28.3"
-        assert hass.states.get("sensor.decent_refill_threshold").state == "5.0"
+        assert hass.states.get("number.decent_refill_threshold").state == "5"
         assert hass.states.get("sensor.decent_scale_weight").state == "36.2"
         assert hass.states.get("sensor.decent_scale_weight_flow").state == "1.5"
         assert hass.states.get("sensor.decent_scale_battery").state == "50.0"
@@ -434,18 +527,21 @@ async def test_streams_start_and_stop_with_entry(
         )
         assert hass.states.get("sensor.decent_shot_phase").state == "idle"
         for suffix, expected, unit in (
-            ("target_steam_temperature", "160.0", "°C"),
-            ("target_steam_duration", "120.0", "s"),
-            ("target_hot_water_temperature", "88.0", "°C"),
-            ("target_hot_water_volume", "50.0", "mL"),
-            ("target_hot_water_duration", "30.0", "s"),
-            ("target_shot_volume", "200.0", "mL"),
+            ("target_steam_temperature", "160", "°C"),
+            ("target_steam_duration", "120", "s"),
+            ("target_hot_water_temperature", "88", "°C"),
+            ("target_hot_water_volume", "50", "mL"),
+            ("target_hot_water_duration", "30", "s"),
+            ("target_shot_volume", "200", "mL"),
             ("configured_group_temperature", "93.0", "°C"),
         ):
-            state = hass.states.get(f"sensor.decent_{suffix}")
+            state = hass.states.get(f"number.decent_{suffix}")
             assert state.state == expected
             assert state.attributes["unit_of_measurement"] == unit
         assert hass.states.get("event.decent_shot_event").state == "unknown"  # Initial replay.
+        app = hass.states.get("update.decent_decaid_app")
+        assert app.attributes["latest_version"] == "1.5.0"
+        assert app.attributes["update_percentage"] == 25
         assert (
             hass.states.get("sensor.decent_water_level").attributes["unit_of_measurement"] == "mm"
         )
@@ -472,7 +568,11 @@ async def test_shot_events_preserve_rapid_decisions_and_ignore_replay(
     shot.async_receive(shot_payload, initial=True)
     event_id = "event.decent_shot_event"
     events = []
-    unsub = async_track_state_change_event(hass, [event_id], events.append)
+    # A bare builtin is not a callback, so Home Assistant would run it in the
+    # executor and the events could arrive out of order.
+    unsub = async_track_state_change_event(
+        hass, [event_id], callback(lambda event: events.append(event))
+    )
     try:
         for kind, reason, phase in (
             ("advance", "profileSkip", "pouring"),
@@ -549,12 +649,12 @@ async def test_water_entity_disconnect_recovery_and_unchanged_threshold(
         water.async_receive({"currentLevel": level, "refillLevel": 5})
 
     push(28.3)
-    threshold = hass.states.get("sensor.decent_refill_threshold")
+    threshold = hass.states.get("number.decent_refill_threshold")
     freezer.tick(timedelta(seconds=1))
     push(28.4)
     assert hass.states.get("sensor.decent_water_level").state == "28.4"
     assert (
-        hass.states.get("sensor.decent_refill_threshold").last_reported == threshold.last_reported
+        hass.states.get("number.decent_refill_threshold").last_reported == threshold.last_reported
     )
     payloads["devices"] = []
     await entry.runtime_data.devices.async_refresh()
@@ -565,7 +665,7 @@ async def test_water_entity_disconnect_recovery_and_unchanged_threshold(
     assert hass.states.get("sensor.decent_water_level").state == "unavailable"
     push(30)
     assert hass.states.get("sensor.decent_water_level").state == "30.0"
-    assert hass.states.get("sensor.decent_refill_threshold").state == "5.0"
+    assert hass.states.get("number.decent_refill_threshold").state == "5"
 
 
 async def test_shot_settings_follow_machine_availability(
@@ -582,8 +682,8 @@ async def test_shot_settings_follow_machine_availability(
         settings.async_receive(shot_settings_payload)
 
     push()
-    entity_id = "sensor.decent_target_steam_temperature"
-    assert hass.states.get(entity_id).state == "160.0"
+    entity_id = "number.decent_target_steam_temperature"
+    assert hass.states.get(entity_id).state == "160"
     payloads["devices"] = []
     await entry.runtime_data.devices.async_refresh()
     push()
@@ -592,4 +692,388 @@ async def test_shot_settings_follow_machine_availability(
     await entry.runtime_data.devices.async_refresh()
     assert hass.states.get(entity_id).state == "unavailable"
     push()
-    assert hass.states.get(entity_id).state == "160.0"
+    assert hass.states.get(entity_id).state == "160"
+
+
+def _get_from(payloads):
+    async def get(path):
+        result = payloads[path]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    return get
+
+
+@pytest.mark.parametrize("state", sorted(BUSY_STATES))
+async def test_sleep_refused_while_busy(hass, setup_entry, payloads, state):
+    entry, power = setup_entry
+    payloads["machine/state"] = {"state": {"state": state}}
+    await entry.runtime_data.machine.async_refresh()
+    with pytest.raises(HomeAssistantError, match="busy"):
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": "switch.decent_power"}, blocking=True
+        )
+    power.assert_not_awaited()
+    assert hass.states.get("switch.decent_power").state == "on"
+
+
+async def test_sleep_not_resent_to_sleeping_machine(hass, setup_entry):
+    _, power = setup_entry
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": "switch.decent_power"}, blocking=True
+    )
+    power.assert_not_awaited()
+    assert hass.states.get("switch.decent_power").state == "off"
+
+
+async def test_setup_when_only_device_inventory_answers(hass, payloads):
+    """A machine that is off at the wall must not block the tablet's entities."""
+    payloads["machine/state"] = DecaidError("no machine")
+    payloads["devices"] = [{"type": "machine", "id": "abc", "state": "disconnected"}]
+    entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
+    entry.add_to_hass(hass)
+    with patch("custom_components.decaid.api.DecaidClient.get", side_effect=_get_from(payloads)):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert hass.states.get("sensor.decent_state").state == "unavailable"
+        assert hass.states.get("switch.decent_power").state == "unavailable"
+        assert hass.states.get("binary_sensor.decent_machine_connected").state == "off"
+        assert hass.states.get("sensor.decent_tablet_battery").state == "80.0"
+        assert hass.states.get("sensor.decent_last_shot").state == "unknown"
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_live_readings_rounded_and_flow_class(hass, setup_entry, payloads):
+    entry, _ = setup_entry
+    payloads["machine/state"] = {
+        **payloads["machine/state"],
+        "groupTemperature": 92.4449,
+        "pressure": 9.876,
+        "flow": 2.0412,
+    }
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get("sensor.decent_grouphead_temperature").state == "92.4"
+    assert hass.states.get("sensor.decent_pressure").state == "9.9"
+    flow = hass.states.get("sensor.decent_flow")
+    assert flow.state == "2.0"
+    assert flow.attributes["unit_of_measurement"] == "mL/s"
+    assert flow.attributes["device_class"] == "volume_flow_rate"
+    # Jitter below the kept precision does not write a new state.
+    before = hass.states.get("sensor.decent_grouphead_temperature").last_reported
+    payloads["machine/state"] = {**payloads["machine/state"], "groupTemperature": 92.4101}
+    await entry.runtime_data.machine.async_refresh()
+    assert hass.states.get("sensor.decent_grouphead_temperature").last_reported == before
+
+
+async def test_diagnostic_entity_categories(hass, setup_entry):
+    from homeassistant.const import EntityCategory
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    for entity_id in (
+        "sensor.decent_tablet_battery",
+        "sensor.decent_scale_battery",
+        "binary_sensor.decent_machine_connected",
+        "binary_sensor.decent_scale_connected",
+    ):
+        assert registry.async_get(entity_id).entity_category is EntityCategory.DIAGNOSTIC
+    assert registry.async_get("sensor.decent_pressure").entity_category is None
+
+
+async def test_last_stop_reason_survives_restart(hass, payloads, shot_payload):
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+
+    mock_restore_cache(hass, [State("sensor.decent_last_shot_stop_reason", "targetWeight")])
+    entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
+    entry.add_to_hass(hass)
+    with patch("custom_components.decaid.api.DecaidClient.get", side_effect=_get_from(payloads)):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        shot = entry.runtime_data.shot
+        shot.stream.active = True
+        shot.async_receive(shot_payload, initial=True)
+        assert hass.states.get("sensor.decent_last_shot_stop_reason").state == "targetWeight"
+        shot.async_receive(
+            {**shot_payload, "event": "decision", "decision": {"kind": "stop", "reason": "time"}}
+        )
+        assert hass.states.get("sensor.decent_last_shot_stop_reason").state == "time"
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_event_missed_during_reconnect_is_delivered(hass, setup_entry, shot_payload):
+    entry, _ = setup_entry
+    shot = entry.runtime_data.shot
+    event_id = "event.decent_shot_event"
+    shot.stream.active = True
+    shot.async_receive(shot_payload, initial=True)  # Startup replay: never an event.
+    assert hass.states.get(event_id).state == "unknown"
+    # The same frame replayed after a reconnect is still not an event.
+    shot.async_stream_lost()
+    shot.async_receive(shot_payload, initial=True)
+    assert hass.states.get(event_id).state == "unknown"
+    # A newer frame on reconnect happened while the socket was down.
+    shot.async_stream_lost()
+    shot.async_receive(
+        {
+            **shot_payload,
+            "event": "terminal",
+            "state": "finished",
+            "timestamp": "2026-09-10T07:19:40.000000",
+            "decision": {"kind": "terminal", "reason": "targetWeight"},
+        },
+        initial=True,
+    )
+    state = hass.states.get(event_id)
+    assert state.state not in ("unknown", "unavailable")
+    assert state.attributes["event_type"] == "terminal"
+
+
+async def test_scale_reading_restores_connection(hass, setup_entry):
+    from time import monotonic
+
+    entry, _ = setup_entry
+    scale = entry.runtime_data.scale
+    scale.stream.active = True
+    scale.stream.received_at = monotonic()
+    scale.set_device_connected(False)
+    scale.async_receive({"weight": 1.2, "weightFlow": 0})
+    assert scale.device_connected
+    assert hass.states.get("sensor.decent_scale_weight").state == "1.2"
+
+
+async def test_diagnostics_redact_private_details(hass, setup_entry):
+    from custom_components.decaid.diagnostics import async_get_config_entry_diagnostics
+
+    entry, _ = setup_entry
+    hass.config_entries.async_update_entry(entry, data={**entry.data, "machine_id": "abc"})
+    entry.runtime_data.settings.last_exception = DecaidError(
+        "Unable to read settings: cannot connect to 192.168.2.231:8080"
+    )
+    result = await async_get_config_entry_diagnostics(hass, entry)
+    text = str(result)
+    assert "192.168.2.231" not in text
+    assert "abc" not in text  # Device ID, in the inventory and the configured machine ID.
+    assert result["entry"]["machine_id"] == "**REDACTED**"
+    assert result["coordinators"]["devices"]["data"][0]["state"] == "connected"
+    assert result["coordinators"]["settings"]["data"] == ["chargingState"]
+    assert result["coordinators"]["shots"]["data"] == {
+        "total": 1265,
+        "latest_fields": None,
+        "summary": None,
+    }
+    assert "12345" not in text  # Machine serial number.
+    assert result["coordinators"]["machine_info"]["data"]["model"] == "DE1Pro"
+    assert result["coordinators"]["presence"]["data"]["schedules"] == 0
+    assert result["coordinators"]["machine"]["data"]["groupTemperature"] == 92.4
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("192.168.2.231", "192.168.2.231"),
+        (" ::1 ", "::1"),
+        ("Decent-Tablet.local.", "decent-tablet.local"),
+        ("tablet", "tablet"),
+        ("http://tablet", None),
+        ("tablet:8080", None),
+        ("[::1]", None),
+        ("-bad.local", None),
+        ("bad_host", None),
+        ("", None),
+    ],
+)
+def test_normalize_host(raw, expected):
+    from custom_components.decaid.config_flow import normalize_host
+
+    assert normalize_host(raw) == expected
+
+
+async def test_flow_hostname_and_devices_only(hass):
+    async def get(path):
+        if path == "devices":
+            return [{"type": "machine", "id": "abc", "state": "disconnected"}]
+        raise DecaidError("no machine")
+
+    result = await hass.config_entries.flow.async_init("decaid", context={"source": SOURCE_USER})
+    with (
+        patch("custom_components.decaid.api.DecaidClient.get", side_effect=get),
+        patch("custom_components.decaid.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": " Decent-Tablet.local ", "port": 8080, "machine_id": "abc"}
+        )
+        assert result["type"] == "create_entry"
+        assert result["data"]["host"] == "decent-tablet.local"
+        # The machine is away, so there is no serial to identify it by yet.
+        assert result["result"].unique_id is None
+        await hass.async_block_till_done()
+
+
+async def test_flow_rejects_unknown_machine_id(hass, payloads):
+    result = await hass.config_entries.flow.async_init("decaid", context={"source": SOURCE_USER})
+    with patch("custom_components.decaid.api.DecaidClient.get", side_effect=_get_from(payloads)):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": "192.168.2.231", "port": 8080, "machine_id": "typo"}
+        )
+    assert result["errors"] == {"machine_id": "unknown_machine"}
+
+
+async def test_setup_records_machine_serial(hass, setup_entry):
+    entry, _ = setup_entry
+    assert entry.unique_id == "12345"
+
+
+async def test_new_tablet_for_same_machine_moves_entry(hass, setup_entry, payloads):
+    entry, _ = setup_entry
+    power_id = hass.states.get("switch.decent_power").entity_id
+    result = await hass.config_entries.flow.async_init("decaid", context={"source": SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"host": "192.168.2.240", "port": 8081}
+    )
+    await hass.async_block_till_done()
+    assert result["reason"] == "moved_to_new_tablet"
+    assert len(hass.config_entries.async_entries("decaid")) == 1
+    assert (entry.data["host"], entry.data["port"]) == ("192.168.2.240", 8081)
+    assert hass.states.get(power_id) is not None
+
+
+async def test_serial_recorded_once_machine_reports_it(hass, payloads):
+    real = payloads["machine/info"]
+    payloads["machine/info"] = {**real, "serialNumber": "0", "model": "Unknown"}
+    entry = MockConfigEntry(domain="decaid", data={"host": "192.168.2.231", "port": 8080})
+    entry.add_to_hass(hass)
+    with patch("custom_components.decaid.api.DecaidClient.get", side_effect=_get_from(payloads)):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        # Decaid's placeholder before the machine's handshake is not a serial.
+        assert entry.unique_id is None
+        payloads["machine/info"] = real
+        await entry.runtime_data.machine_info.async_refresh()
+        assert entry.unique_id == "12345"
+        # Once set it is kept, even if a later read differs.
+        payloads["machine/info"] = {**real, "serialNumber": "67890"}
+        await entry.runtime_data.machine_info.async_refresh()
+        assert entry.unique_id == "12345"
+        await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_reconfigure_onto_another_entrys_machine_is_refused(hass, setup_entry, payloads):
+    other = MockConfigEntry(
+        domain="decaid", unique_id="99999", data={"host": "192.168.2.250", "port": 8080}
+    )
+    other.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(
+        "decaid", context={"source": SOURCE_RECONFIGURE, "entry_id": other.entry_id}
+    )
+    # The setup_entry tablet's machine (serial 12345) already has its own entry.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"host": "192.168.2.251", "port": 8080}
+    )
+    assert result["reason"] == "machine_already_configured"
+    assert other.data["host"] == "192.168.2.250"
+
+
+async def test_serial_ignored_for_another_selected_machine(hass, setup_entry, payloads):
+    """machine/info describes the connected machine, not a listed one the entry selects."""
+    entry, _ = setup_entry
+    payloads["devices"] = [
+        {"type": "machine", "id": "a", "state": "connected"},
+        {"type": "machine", "id": "b", "state": "disconnected"},
+    ]
+    result = await hass.config_entries.flow.async_init("decaid", context={"source": SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"host": "192.168.2.240", "port": 8080, "machine_id": "b"}
+    )
+    await hass.async_block_till_done()
+    # Machine A's existing entry is left alone; B gets an entry of its own.
+    assert result["type"] == "create_entry"
+    assert result["result"].unique_id is None
+    assert entry.data["host"] == "192.168.2.231"
+
+
+async def test_serial_not_recorded_while_selected_machine_is_away(hass, payloads):
+    payloads["devices"] = [
+        {"type": "machine", "id": "a", "state": "connected"},
+        {"type": "machine", "id": "b", "state": "disconnected"},
+    ]
+    entry = MockConfigEntry(
+        domain="decaid", data={"host": "192.168.2.231", "port": 8080, "machine_id": "b"}
+    )
+    entry.add_to_hass(hass)
+    with patch("custom_components.decaid.api.DecaidClient.get", side_effect=_get_from(payloads)):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.unique_id is None
+        await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_reconfigure_without_serial_clears_identity(hass, setup_entry, payloads):
+    entry, _ = setup_entry
+    assert entry.unique_id == "12345"
+    payloads["machine/info"] = DecaidError("machine away")
+    payloads["machine/state"] = DecaidError("machine away")
+    payloads["devices"] = []
+    result = await hass.config_entries.flow.async_init(
+        "decaid", context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"host": "192.168.2.232", "port": 8080}
+    )
+    await hass.async_block_till_done()
+    assert result["reason"] == "reconfigure_successful"
+    # The new tablet's machine is unknown, so the old serial must not follow.
+    assert entry.unique_id is None
+
+
+async def test_late_serial_collision_raises_repair_issue(hass, setup_entry, payloads):
+    from homeassistant.helpers import issue_registry as ir
+
+    original, _ = setup_entry
+    real = payloads["machine/info"]
+    payloads["machine/info"] = {**real, "serialNumber": "0"}
+    replacement = MockConfigEntry(
+        domain="decaid", title="New tablet", data={"host": "192.168.2.240", "port": 8080}
+    )
+    replacement.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(replacement.entry_id)
+    await hass.async_block_till_done()
+    assert replacement.unique_id is None
+    payloads["machine/info"] = real
+    await replacement.runtime_data.machine_info.async_refresh()
+    # Neither entry is merged or removed automatically.
+    assert replacement.unique_id is None
+    assert original.unique_id == "12345"
+    issue = ir.async_get(hass).async_get_issue(
+        "decaid", f"duplicate_machine_{replacement.entry_id}"
+    )
+    assert issue is not None
+    assert issue.translation_placeholders["existing"] == original.title
+    assert await hass.config_entries.async_remove(replacement.entry_id)
+    await hass.async_block_till_done()
+    assert (
+        ir.async_get(hass).async_get_issue("decaid", f"duplicate_machine_{replacement.entry_id}")
+        is None
+    )
+
+
+async def test_refill_threshold_rereads_while_stream_is_down(hass, setup_entry, payloads):
+    entry, _ = setup_entry
+    water = entry.runtime_data.water
+    assert not water.stream.active
+    with patch(
+        "custom_components.decaid.api.DecaidClient.command", new_callable=AsyncMock
+    ) as command:
+        payloads["machine/waterLevels"] = {"currentLevel": 28.3, "refillLevel": 8}
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": "number.decent_refill_threshold", "value": 8},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+    command.assert_awaited_once_with("POST", "machine/waterLevels", {"refillLevel": 8})
+    assert hass.states.get("number.decent_refill_threshold").state == "8"

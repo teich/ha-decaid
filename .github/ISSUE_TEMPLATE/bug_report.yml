@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in the integration is not working as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What you expected, what happened instead, and how to reproduce it.
+    validations:
+      required: true
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: "2026.11.1"
+    validations:
+      required: true
+  - type: input
+    id: decaid_version
+    attributes:
+      label: Decaid app version and machine model
+      placeholder: "Decaid 1.4.0 on a DE1Pro"
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >-
+        Settings → Devices & services → Decaid → ⋮ → Download diagnostics, then attach the file.
+        Addresses, serial numbers, and device IDs are redacted.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from Settings → System → Logs, filtered for "decaid".
+      render: text

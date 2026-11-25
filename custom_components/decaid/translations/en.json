@@ -4,30 +4,50 @@
     "step": {
       "user": {
         "title": "Connect to Decaid",
-        "description": "Enter the tablet IP address. Leave machine ID blank to match any machine; optionally enter its ID from /api/v1/devices.",
+        "description": "Enter the IP address or hostname of the tablet running Decaid. Leave machine ID blank to match any machine; optionally enter its ID from /api/v1/devices.",
         "data": {
-          "host": "Tablet IP address",
+          "host": "Tablet IP address or hostname",
           "port": "REST API port",
           "machine_id": "Machine device ID (optional)"
         }
       },
       "reconfigure": {
         "title": "Change Decaid connection",
-        "description": "Enter the tablet IP address. Leave machine ID blank to match any machine; optionally enter its ID from /api/v1/devices.",
+        "description": "Enter the IP address or hostname of the tablet running Decaid. Leave machine ID blank to match any machine; optionally enter its ID from /api/v1/devices.",
         "data": {
-          "host": "Tablet IP address",
+          "host": "Tablet IP address or hostname",
           "port": "REST API port",
           "machine_id": "Machine device ID (optional)"
         }
       }
     },
     "error": {
-      "invalid_host": "Enter a valid IPv4 or IPv6 address without a URL or port.",
-      "cannot_connect": "Cannot read Decaid machine state. Check the IP, port, and that the tablet REST API is reachable."
+      "invalid_host": "Enter a valid IP address or hostname, without http:// or a port.",
+      "cannot_connect": "Cannot reach Decaid. Check the address, port, and that the tablet REST API is reachable.",
+      "unknown_machine": "No machine with this ID is listed in /api/v1/devices. Check the ID, or leave it blank to match any machine."
     },
     "abort": {
       "already_configured": "This tablet endpoint is already configured.",
-      "reconfigure_successful": "Connection updated."
+      "machine_already_configured": "The machine connected to this tablet already has its own Decaid entry. Reconfigure that entry instead, or remove it first.",
+      "reconfigure_successful": "Connection updated.",
+      "moved_to_new_tablet": "This machine was already set up through another tablet. The existing Decent device now uses this tablet, keeping its entities and history."
+    }
+  },
+  "issues": {
+    "duplicate_machine": {
+      "title": "Decent machine set up twice",
+      "description": "{entry} is connected to the same machine as {existing}. If you replaced the tablet, delete {entry}, then use Reconfigure on {existing} and enter the new tablet's address. {existing} keeps its entities and history."
+    }
+  },
+  "entity": {
+    "select": {
+      "steam_purge_mode": {
+        "name": "Steam purge mode",
+        "state": {
+          "normal": "Normal",
+          "two_tap_stop": "Two-tap stop"
+        }
+      }
     }
   }
 }

@@ -117,3 +117,25 @@ def test_invalid_shot_settings(shot_settings_payload, bad_value):
 def test_incomplete_shot_settings():
     with pytest.raises(DecaidError, match="Invalid shot settings"):
         validate_payload("machine/shotSettings", {"targetSteamTemp": 160})
+
+
+def test_history_payloads():
+    shots = {"items": [], "total": 3, "limit": 1, "offset": 0}
+    assert validate_payload("shots?limit=1", shots) == shots
+
+
+@pytest.mark.parametrize("payload", [{}, {"total": True}, {"total": "3"}, {"total": None}, []])
+def test_invalid_shot_list(payload):
+    with pytest.raises(DecaidError):
+        validate_payload("shots?limit=1", payload)
+
+
+async def test_query_string_is_not_percent_encoded():
+    session = MagicMock()
+    response = AsyncMock()
+    response.status = 200
+    response.json.return_value = {"total": 1}
+    session.request.return_value.__aenter__.return_value = response
+    client = DecaidClient(session, "::1", 8080)
+    assert await client.get("shots?limit=1") == {"total": 1}
+    assert str(session.request.call_args.args[1]) == "http://[::1]:8080/api/v1/shots?limit=1"
